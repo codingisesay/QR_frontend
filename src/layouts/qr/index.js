@@ -40,7 +40,7 @@ import {
   bulkBindDevices,
   getLabelStats,
   getCodesByPrintRun,           // ✅ use helper (no hardcoded URL)
-  compositeMintAssemble,        // ✅ cascade API
+  linkAssembly,                 // ✅ interlink parent↔children during bind
 } from "api/qr";
 
 /* Build the base for public verify URLs (e.g., http://127.0.0.1:8000) */
@@ -75,6 +75,43 @@ function useQuery() {
    Preview dialog (QR codes)
    ========================= */
 function QrPreviewDialog({ open, onClose, printRunId }) {
+  // Normalize 'bound' flag from various API shapes
+const isItemBound = (r) => {
+  if (!r) return false;
+
+  // explicit bool/flag fields
+  if (typeof r.is_bound !== "undefined") return r.is_bound === 1 || r.is_bound === true;
+  if (typeof r.bound !== "undefined") return r.bound === 1 || r.bound === true;
+  if (typeof r.bound_flag !== "undefined") return !!r.bound_flag;
+
+  // timestamp fields
+  if (typeof r.bound_at !== "undefined") return !!r.bound_at;
+  if (typeof r.bind_at !== "undefined") return !!r.bind_at;
+  if (typeof r.boundOn !== "undefined") return !!r.boundOn;
+  if (typeof r.boundAt !== "undefined") return !!r.boundAt;
+
+  // device linkage fields
+  if (typeof r.device_uid !== "undefined") return !!r.device_uid;
+  if (typeof r.deviceId !== "undefined") return !!r.deviceId;
+  if (typeof r.device_id !== "undefined") return !!r.device_id;
+  if (typeof r.bound_device_uid !== "undefined") return !!r.bound_device_uid;
+  if (typeof r.linked_device_uid !== "undefined") return !!r.linked_device_uid;
+  if (typeof r.has_device !== "undefined") return !!r.has_device;
+
+  // status string
+  if (typeof r.status === "string") {
+    const st = r.status.toLowerCase();
+    if (st === "bound" || st === "activated" || st === "active" || st === "linked") return true;
+    if (st === "issued" || st === "new" || st === "unbound") return false;
+    // Unknown string statuses (e.g., vendor-specific) → assume bound if not explicitly issued-like
+    return st !== "issued";
+  }
+
+  // fallback: presence of verification token AND any linkage hint
+  if (r.token && (r.uid || r.uid_hex || r.serial)) return true;
+
+  return false;
+};
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState([]);
   const [err, setErr] = useState("");
@@ -102,7 +139,8 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
       setErr("");
       try {
         const data = await getCodesByPrintRun(printRunId, 500);
-        if (mounted) setItems(data.items || []);
+        const arr = (data.items || []).map(it => ({ ...it }));
+        if (mounted) setItems(arr);
       } catch (e) {
         if (mounted)
           setErr(e?.response?.data?.message || e.message || "Failed to load QR codes.");
@@ -193,15 +231,15 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
 
   // Simple filters for STANDARD
   const stdFiltered = items.filter((r) => {
-    if (filter === "bound") return r.is_bound === 1 || r.is_bound === true;
-    if (filter === "issued") return !r.is_bound;
+    if (filter === "bound") return isItemBound(r);
+    if (filter === "issued") return !isItemBound(r);
     return true; // all
   });
 
   // Filters for COMPOSITE (flat list)
   const flatFiltered = items.filter((r) => {
-    if (filter === "bound") return r.is_bound === 1 || r.is_bound === true;
-    if (filter === "issued") return !r.is_bound;
+    if (filter === "bound") return isItemBound(r);
+    if (filter === "issued") return !isItemBound(r);
     if (filter === "parents") return r.role === "parent";
     if (filter === "parts") return r.role === "part";
     if (filter === "bom_missing") return r.role === "parent" && r.comp_ok === false;
@@ -444,7 +482,7 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
                   role="parent"
                   compCount={root.comp_count || 0}
                   compReq={root.comp_required || 0}
-                  isBound={!!root.is_bound}
+                  isBound={isItemBound(root)}
                   composite
                 />
                 {/* Parts under this root */}
@@ -480,7 +518,7 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
                             compCount={0}
                             compReq={0}
                             parentUid={root.device_uid}
-                            isBound={!!token}
+                            isBound={!!token || isItemBound(ch)}
                             composite
                           />
                         );
@@ -584,7 +622,7 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
                 compCount={r.comp_count || 0}
                 compReq={r.comp_required || 0}
                 parentUid={r.parent_device_uid}
-                isBound={!!r.is_bound}
+                isBound={isItemBound(r)}
                 composite={effectiveType === "composite"}
               />
             ))}
@@ -839,29 +877,6 @@ function MintDialog({ open, onClose, product }) {
       setLoading(false);
     }
   }
-
-  // NEW: One-click composite cascade (root + all BOM parts)
-  async function onCascade() {
-    setErr("");
-    setLoading(true);
-    try {
-      const payload = {
-        root_sku: product?.sku,
-        roots_qty: Number(qty) || 1,
-        channel_code: channel.trim(),
-        batch_code: batch.trim() || undefined,
-        print_vendor: vendor.trim() || undefined,
-      };
-      const data = await compositeMintAssemble(payload);
-      setResult({ print_run_id: data.print_run_id, issued: undefined });
-      setPreviewOpen(true);
-    } catch (e) {
-      setErr(e?.response?.data?.message || e.message || "Composite cascade failed.");
-    } finally {
-      setLoading(false);
-    }
-  }
-
   const isComposite = (product?.type || "").toLowerCase() === "composite";
 
   return (
@@ -928,163 +943,10 @@ function MintDialog({ open, onClose, product }) {
           <Icon sx={{ mr: 0.5 }}>qr_code_2</Icon> {loading ? "Generating…" : "Generate"}
         </MDButton>
         {/* Composite Cascade */}
-        {isComposite && (
-          <MDButton variant="gradient" color="warning" onClick={onCascade} disabled={loading}>
-            <Icon sx={{ mr: 0.5 }}>account_tree</Icon> Cascade parts & assemble
-          </MDButton>
-        )}
       </DialogActions>
 
       <QrPreviewDialog open={previewOpen} onClose={() => setPreviewOpen(false)} printRunId={result?.print_run_id} />
     </Dialog>
-  );
-}
-
-/* =========================
-   Bulk QR mint (Excel/CSV)
-   ========================= */
-function BulkMintPanel() {
-  const [rows, setRows] = useState([]);
-  const [err, setErr] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [progress, setProgress] = useState({ done: 0, total: 0 });
-  const fileRef = useRef(null);
-
-  function parseWorkbook(wb) {
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const json = XLSX.utils.sheet_to_json(ws, { defval: "" });
-    const norm = json
-      .map((r) => {
-        const o = {};
-        for (const k of Object.keys(r)) o[String(k).trim().toLowerCase()] = r[k];
-        return {
-          sku: String(o.sku || "").trim(),
-          qty: Number(o.qty || o.quantity || 0),
-          channel_code: String(o.channel || o.channel_code || "WEB").trim(),
-          batch_code: String(o.batch || o.batch_code || "").trim() || undefined,
-          print_vendor: String(o.vendor || o.print_vendor || "").trim() || undefined,
-          micro_mode: String(o.micro_mode || "hmac16").trim(),
-        };
-      })
-      .filter((r) => r.sku && r.qty > 0);
-    return norm;
-  }
-
-  async function onFile(e) {
-    setErr("");
-    setRows([]);
-    try {
-      const f = e.target.files?.[0];
-      if (!f) return;
-      const buf = await f.arrayBuffer();
-      const wb = XLSX.read(buf);
-      const norm = parseWorkbook(wb);
-      if (!norm.length) throw new Error("No valid rows found (need columns: sku, qty, channel_code).");
-      setRows(norm);
-    } catch (ex) {
-      setErr(ex.message || "Failed to parse file.");
-    }
-  }
-
-  function downloadTemplate() {
-    const data = [
-      ["sku", "qty", "channel_code", "batch_code", "print_vendor", "micro_mode"],
-      ["SKU-001", "1000", "WEB", "B24-09", "Shree Labels", "hmac16"],
-    ];
-    const ws = XLSX.utils.aoa_to_sheet(data);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Template");
-    XLSX.writeFile(wb, "qr_bulk_template.xlsx");
-  }
-
-  async function run() {
-    setErr("");
-    if (!rows.length) return;
-    setBusy(true);
-    setProgress({ done: 0, total: rows.length });
-    try {
-      let done = 0;
-      for (const r of rows) {
-        try {
-          await mintProductCodes(r.sku, {
-            qty: r.qty,
-            channel_code: r.channel_code,
-            batch_code: r.batch_code,
-            micro_mode: r.micro_mode || "hmac16",
-            create_print_run: true,
-            print_vendor: r.print_vendor,
-          });
-        } catch (e) {
-          console.error("Row failed", r, e);
-        } finally {
-          done += 1;
-          setProgress({ done, total: rows.length });
-        }
-      }
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <MDBox p={3}>
-      {err && (
-        <MDTypography color="error" variant="button" mb={2} display="block">
-          {err}
-        </MDTypography>
-      )}
-      <MDBox display="flex" alignItems="center" gap={1} mb={2}>
-        <input type="file" accept=".xlsx,.xls,.csv" onChange={onFile} ref={fileRef} style={{ display: "none" }} />
-        <MDButton variant="outlined" color="info" onClick={() => fileRef.current?.click()}>
-          <Icon sx={{ mr: 0.5 }}>upload</Icon> Upload Excel / CSV
-        </MDButton>
-        <MDButton variant="text" color="info" onClick={downloadTemplate}>
-          <Icon sx={{ mr: 0.5 }}>download</Icon> Download Template
-        </MDButton>
-      </MDBox>
-
-      {rows.length > 0 && (
-        <MDBox>
-          <MDTypography variant="button" fontWeight="medium" mb={1} display="block">
-            Preview ({rows.length} rows)
-          </MDTypography>
-          <MDBox sx={{ maxHeight: 320, overflow: "auto", border: "1px solid rgba(0,0,0,.08)", borderRadius: 1 }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  <th style={{ padding: 8, textAlign: "left" }}>SKU</th>
-                  <th style={{ padding: 8, textAlign: "right" }}>Qty</th>
-                  <th style={{ padding: 8, textAlign: "left" }}>Channel</th>
-                  <th style={{ padding: 8, textAlign: "left" }}>Batch</th>
-                  <th style={{ padding: 8, textAlign: "left" }}>Vendor</th>
-                  <th style={{ padding: 8, textAlign: "left" }}>Micro</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r, i) => (
-                  <tr key={i} style={{ borderTop: "1px solid rgba(0,0,0,.05)" }}>
-                    <td style={{ padding: 8 }}>{r.sku}</td>
-                    <td style={{ padding: 8, textAlign: "right" }}>{r.qty}</td>
-                    <td style={{ padding: 8 }}>{r.channel_code}</td>
-                    <td style={{ padding: 8 }}>{r.batch_code || "—"}</td>
-                    <td style={{ padding: 8 }}>{r.print_vendor || "—"}</td>
-                    <td style={{ padding: 8 }}>{r.micro_mode || "hmac16"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </MDBox>
-
-          <MDBox mt={2}>
-            {busy && <LinearProgress />}
-            <MDButton variant="gradient" color="info" onClick={run} disabled={busy}>
-              <Icon sx={{ mr: 0.5 }}>qr_code_2</Icon>{" "}
-              {busy ? `Generating… ${progress.done}/${progress.total}` : "Generate QR for all"}
-            </MDButton>
-          </MDBox>
-        </MDBox>
-      )}
-    </MDBox>
   );
 }
 
@@ -1111,8 +973,9 @@ function BindDevicesPanel({ products, labelStatsMap }) {
 
   function downloadTemplate() {
     const data = [
-      ["device_uid", "serial", "imei", "mac", "mfg_date", "token"],
-      ["DEV-0001", "SER-0001", "356789012345678", "00:11:22:33:44:55", "2025-09-20", ""], // leave token blank if allocate=true
+      ["device_uid", "serial", "imei", "mac", "mfg_date", "token", "parent_device_uid"],
+      ["ROOT-0001", "SER-0001", "356789012345678", "00:11:22:33:44:55", "2025-09-20", "", ""],
+      ["PART-1001", "SER-1001", "", "", "2025-09-20", "", "ROOT-0001"]
     ];
     const ws = XLSX.utils.aoa_to_sheet(data);
     const wb = XLSX.utils.book_new();
@@ -1129,14 +992,15 @@ function BindDevicesPanel({ products, labelStatsMap }) {
         for (const k of Object.keys(r)) low[String(k).trim().toLowerCase()] = r[k];
         const uid = String(low.device_uid || low.uid || low.serial || "").trim();
         const token = String(low.token || "").trim() || undefined;
+        const parent = String(low.parent_device_uid || low.parent || "").trim();
         const attrs = {};
         for (const [k, v] of Object.entries(low)) {
-          if (["device_uid", "uid", "serial", "token"].includes(k)) continue;
+          if (["device_uid", "uid", "serial", "token", "parent_device_uid", "parent"].includes(k)) continue;
           attrs[k] = v;
         }
-        return { device_uid: uid, token, attrs };
+        return { device_uid: uid, token, attrs, parent_device_uid: parent || undefined };
       })
-      .filter((r) => r.device_uid);
+      ;
     return norm;
   }
 
@@ -1151,7 +1015,7 @@ function BindDevicesPanel({ products, labelStatsMap }) {
       const wb = XLSX.read(buf);
       const norm = parseWorkbook(wb);
       if (!norm.length)
-        throw new Error("No valid rows found. Need 'device_uid'. If Auto-allocate is OFF, include 'token'.");
+        throw new Error("No valid rows found. Need 'device_uid'. If Auto-allocate is OFF, include 'token'. Optional: 'parent_device_uid' for interlinking.");
       setRows(norm);
     } catch (ex) {
       setErr(ex.message || "Failed to parse file.");
@@ -1188,9 +1052,21 @@ function BindDevicesPanel({ products, labelStatsMap }) {
       const payload = {
         allocate,
         batch_code: batchCode || undefined,
-        devices: rows.map((r) => ({ device_uid: r.device_uid, token: r.token, attrs: r.attrs })),
+        devices: rows.map((r) => ({ device_uid: (r.device_uid || r.parent_device_uid), token: r.token, attrs: r.attrs })),
       };
       const data = await bulkBindDevices(sku, payload);
+      // Interlink parent↔children if parent_device_uid provided
+      const parentMap = new Map();
+      for (const r of rows) {
+        if (r.parent_device_uid) {
+          const arr = parentMap.get(r.parent_device_uid) || [];
+          arr.push(r.device_uid);
+          parentMap.set(r.parent_device_uid, arr);
+        }
+      }
+      for (const [parentUid, children] of parentMap.entries()) {
+        try { await linkAssembly(parentUid, children); } catch (err) { /* ignore linking errors silently */ }
+      }
       setResult(data);
     } catch (e) {
       setErr(e?.response?.data?.message || e.message || "Bind failed.");
@@ -1252,16 +1128,18 @@ function BindDevicesPanel({ products, labelStatsMap }) {
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr>
-                  <th style={{ padding: 8, textAlign: "left" }}>device_uid</th>
+                  <th style={{ padding: 8, textAlign: "left" }}>device_uid (effective)</th>
                   <th style={{ padding: 8, textAlign: "left" }}>token</th>
+                  <th style={{ padding: 8, textAlign: "left" }}>parent_device_uid</th>
                   <th style={{ padding: 8, textAlign: "left" }}>attrs…</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((r, i) => (
                   <tr key={i} style={{ borderTop: "1px solid rgba(0,0,0,.05)" }}>
-                    <td style={{ padding: 8 }}>{r.device_uid}</td>
+                    <td style={{ padding: 8 }}>{r.device_uid || r.parent_device_uid}</td>
                     <td style={{ padding: 8 }}>{r.token || (allocate ? "⟶ auto" : "—")}</td>
+                    <td style={{ padding: 8 }}>{r.parent_device_uid || "—"}</td>
                     <td style={{ padding: 8 }}>
                       {Object.keys(r.attrs || {}).length ? JSON.stringify(r.attrs) : "—"}
                     </td>
@@ -1299,7 +1177,7 @@ function BindDevicesPanel({ products, labelStatsMap }) {
                     <table style={{ width: "100%", borderCollapse: "collapse" }}>
                       <thead>
                         <tr style={{ background: "rgba(0,0,0,.02)" }}>
-                          <th style={{ padding: 8, textAlign: "left" }}>device_uid</th>
+                          <th style={{ padding: 8, textAlign: "left" }}>device_uid (effective)</th>
                           <th style={{ padding: 8, textAlign: "left" }}>missing</th>
                         </tr>
                       </thead>
@@ -1338,9 +1216,7 @@ export default function GenerateQrPage() {
 
   const query = useQuery();
   useEffect(() => {
-    const t = query.get("tab") || "";
-    if (t === "bulk") setTab(1);
-    if (t === "bind") setTab(2);
+    const t = query.get("tab") || ""; if (t === "bind") setTab(1);
   }, []); // run once on mount
 
   async function refresh() {
@@ -1459,7 +1335,6 @@ export default function GenerateQrPage() {
                 )}
                 <Tabs value={tab} onChange={(_, v) => setTab(v)}>
                   <Tab label="By Product" />
-                  <Tab label="Bulk QR Mint" />
                   <Tab label="Bind Devices" />
                 </Tabs>
               </MDBox>
@@ -1483,10 +1358,9 @@ export default function GenerateQrPage() {
               )}
 
               {/* Bulk QR mint */}
-              {tab === 1 && <BulkMintPanel />}
 
               {/* Bind Devices */}
-              {tab === 2 && <BindDevicesPanel products={products} labelStatsMap={labelStats} />}
+              {tab === 1 && <BindDevicesPanel products={products} labelStatsMap={labelStats} />}
             </Card>
           </Grid>
         </Grid>

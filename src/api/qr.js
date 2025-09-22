@@ -51,3 +51,15 @@ export async function compositeMintAssemble(body) {
   const { data } = await client.post("/qr/composite/mint-assemble", body);
   return data; // { print_run_id, root:{...}, roots:[...], minted:{...} }
 }
+
+/**
+ * Link a parent device to multiple children (interlinking for composite).
+ * POST /devices/{parentUid}/assembly  { children: [childUid1, childUid2, ...] }
+ */
+export async function linkAssembly(parentUid, childUids) {
+  const { data } = await client.post(
+    `/devices/${encodeURIComponent(parentUid)}/assembly`,
+    { children: childUids }
+  );
+  return data;
+}
