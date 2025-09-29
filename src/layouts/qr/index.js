@@ -43,6 +43,48 @@ import {
   linkAssembly,                 // parent↔children linking
 } from "api/qr";
 
+
+ 
+/* =========================
++   Human/Micro code helpers
++   ========================= */
+// Crockford Base32 (readable; avoids O/0 and I/1) — used ONLY as fallback if server didn't send human_code
+function base32CrockfordFromBytes(bytes, outLen = 13) {
+  const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+  let bits = "";
+  for (const b of bytes) bits += b.toString(2).padStart(8, "0");
+  let out = "";
+  for (let i = 0; i + 5 <= bits.length && out.length < outLen; i += 5) {
+   out += alphabet[parseInt(bits.slice(i, i + 5), 2)];
+  }
+  return out;
+}
+
+// Derive 13-char HC from the first 8 bytes of micro_hex (which represents micro_chk 16 bytes)
+function hcFromMicroHex(microHex) {
+  if (!microHex || typeof microHex !== "string") return null;
+  const hex = microHex.replace(/[^0-9a-f]/gi, "").slice(0, 16); // 8 bytes (16 hex chars)
+  if (hex.length < 2) return null;
+  const bytes = [];
+  for (let i = 0; i < hex.length; i += 2) bytes.push(parseInt(hex.slice(i, i + 2), 16));
+  return base32CrockfordFromBytes(bytes, 13);
+}
+
+// Prefer server-provided code; fall back to alternate field names; last resort derive from micro_hex
+function pickHumanCode(row) {
+  const c =
+    row?.human_code ||
+    row?.micro_code ||
+    row?.qr_human_code ||
+    row?.qr_micro_code ||
+    null;
+  if (c) return String(c).toUpperCase();
+  const derived = hcFromMicroHex(row?.micro_hex);
+  return derived ? derived.toUpperCase() : null;
+}
+
+
+
 /* Build the base for public verify URLs (e.g., http://127.0.0.1:8000) */
 function getVerifyBase() {
   const env =
@@ -134,8 +176,14 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
       setLoading(true);
       setErr("");
       try {
-        const data = await getCodesByPrintRun(printRunId, 500);
-        const arr = (data.items || []).map(it => ({ ...it }));
+        // const data = await getCodesByPrintRun(printRunId, 500);
+        // const arr = (data.items || []).map(it => ({ ...it }));
+                const data = await getCodesByPrintRun(printRunId, 500);
+        // Normalize HC immediately so all UI paths render the same value
+        const arr = (data.items || []).map(it => ({
+          ...it,
+          human_code: pickHumanCode(it),
+       }));
         if (mounted) setItems(arr);
       } catch (e) {
         if (mounted)
@@ -449,7 +497,8 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
                   sku={root.sku}
                   batch={root.batch}
                   seq={root.seq_in_run}
-                  human={root.human_code}
+                  // human={root.human_code}
+                  human={pickHumanCode(root)}
                   deviceUid={root.device_uid}
                   role="parent"
                   compCount={root.comp_count || 0}
@@ -483,7 +532,8 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
                             sku={ch.sku}
                             batch={null}
                             seq={null}
-                            human={null}
+                            // human={null}
+                            human={pickHumanCode(ch)}
                             deviceUid={ch.device_uid}
                             role="part"
                             compCount={0}
@@ -584,7 +634,8 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
                 sku={r.sku}
                 batch={r.batch}
                 seq={r.seq_in_run}
-                human={r.human_code}
+                // human={r.human_code}
+                human={pickHumanCode(r)}
                 deviceUid={r.device_uid}
                 role={r.role}
                 compCount={r.comp_count || 0}
