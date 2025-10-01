@@ -14,6 +14,7 @@ import CreateTenant from "layouts/tenant/create";
 import HomePublic from "layouts/public/home";
 import SetNewPassword from "layouts/authentication/reset-password/set";
 import ProductsPage from "layouts/products";
+import TrackQrPage from "layouts/track"; // NEW
 
 
 import AuthOnly from "auth/AuthOnly";
@@ -92,19 +93,19 @@ const routes = [
   ),
   authOnly: true,
 },
-  // {
-  //   type: "collapse",
-  //   name: "Tables",
-  //   key: "tables",
-  //   icon: <Icon fontSize="small">table_view</Icon>,
-  //   route: "/tables",
-  //   component: <Tables />,
-  //   // component: (
-  //   //   <Protected need="product.read">
-  //   //     <Tables />
-  //   //   </Protected>
-  //   // ),
-  // },
+  {
+  type: "collapse",
+  name: "Track QR",
+  key: "track-qr",
+  icon: <Icon>qr_code_scanner</Icon>, // or "travel_explore"
+  route: "/qr/track",
+  component: (
+    <Protected need="product.read">
+      <TrackQrPage />
+    </Protected>
+  ),
+  authOnly: true,
+},
   {
     type: "collapse",
     name: "Billing",

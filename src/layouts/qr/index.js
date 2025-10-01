@@ -39,9 +39,51 @@ import {
   getRunsByBatch,
   bulkBindDevices,
   getLabelStats,
-  getCodesByPrintRun,           // ✅ use helper (no hardcoded URL)
-  compositeMintAssemble,        // ✅ cascade API
+  getCodesByPrintRun,           // preview helper
+  linkAssembly,                 // parent↔children linking
 } from "api/qr";
+
+
+ 
+/* =========================
++   Human/Micro code helpers
++   ========================= */
+// Crockford Base32 (readable; avoids O/0 and I/1) — used ONLY as fallback if server didn't send human_code
+function base32CrockfordFromBytes(bytes, outLen = 13) {
+  const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+  let bits = "";
+  for (const b of bytes) bits += b.toString(2).padStart(8, "0");
+  let out = "";
+  for (let i = 0; i + 5 <= bits.length && out.length < outLen; i += 5) {
+   out += alphabet[parseInt(bits.slice(i, i + 5), 2)];
+  }
+  return out;
+}
+
+// Derive 13-char HC from the first 8 bytes of micro_hex (which represents micro_chk 16 bytes)
+function hcFromMicroHex(microHex) {
+  if (!microHex || typeof microHex !== "string") return null;
+  const hex = microHex.replace(/[^0-9a-f]/gi, "").slice(0, 16); // 8 bytes (16 hex chars)
+  if (hex.length < 2) return null;
+  const bytes = [];
+  for (let i = 0; i < hex.length; i += 2) bytes.push(parseInt(hex.slice(i, i + 2), 16));
+  return base32CrockfordFromBytes(bytes, 13);
+}
+
+// Prefer server-provided code; fall back to alternate field names; last resort derive from micro_hex
+function pickHumanCode(row) {
+  const c =
+    row?.human_code ||
+    row?.micro_code ||
+    row?.qr_human_code ||
+    row?.qr_micro_code ||
+    null;
+  if (c) return String(c).toUpperCase();
+  const derived = hcFromMicroHex(row?.micro_hex);
+  return derived ? derived.toUpperCase() : null;
+}
+
+
 
 /* Build the base for public verify URLs (e.g., http://127.0.0.1:8000) */
 function getVerifyBase() {
@@ -75,6 +117,41 @@ function useQuery() {
    Preview dialog (QR codes)
    ========================= */
 function QrPreviewDialog({ open, onClose, printRunId }) {
+  // Normalize 'bound' flag from various API shapes
+  const isItemBound = (r) => {
+    if (!r) return false;
+
+    // explicit bool/flag fields
+    if (typeof r.is_bound !== "undefined") return r.is_bound === 1 || r.is_bound === true;
+    if (typeof r.bound !== "undefined") return r.bound === 1 || r.bound === true;
+    if (typeof r.bound_flag !== "undefined") return !!r.bound_flag;
+
+    // timestamp fields
+    if (typeof r.bound_at !== "undefined") return !!r.bound_at;
+    if (typeof r.bind_at !== "undefined") return !!r.bind_at;
+    if (typeof r.boundOn !== "undefined") return !!r.boundOn;
+    if (typeof r.boundAt !== "undefined") return !!r.boundAt;
+
+    // device linkage fields
+    if (typeof r.device_uid !== "undefined") return !!r.device_uid;
+    if (typeof r.deviceId !== "undefined") return !!r.deviceId;
+    if (typeof r.device_id !== "undefined") return !!r.device_id;
+    if (typeof r.bound_device_uid !== "undefined") return !!r.bound_device_uid;
+    if (typeof r.linked_device_uid !== "undefined") return !!r.linked_device_uid;
+    if (typeof r.has_device !== "undefined") return !!r.has_device;
+
+    // status string
+    if (typeof r.status === "string") {
+      const st = r.status.toLowerCase();
+      if (st === "bound" || st === "activated" || st === "active" || st === "linked") return true;
+      if (st === "issued" || st === "new" || st === "unbound") return false;
+      return st !== "issued";
+    }
+
+    if (r.token && (r.uid || r.uid_hex || r.serial)) return true;
+    return false;
+  };
+
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState([]);
   const [err, setErr] = useState("");
@@ -84,7 +161,6 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
   const [grouped, setGrouped] = useState(true); // for composite: grouped vs flat
   const [assemblies, setAssemblies] = useState({}); // { [parentUid]: { children:[...], coverage:{...} } }
 
-  // Reset stale UI state whenever opening for a (possibly) different run
   useEffect(() => {
     if (!open) return;
     setMode("auto");
@@ -93,7 +169,6 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
     setAssemblies({});
   }, [open, printRunId]);
 
-  // Load run codes (via helper)
   useEffect(() => {
     let mounted = true;
     async function load() {
@@ -101,8 +176,15 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
       setLoading(true);
       setErr("");
       try {
-        const data = await getCodesByPrintRun(printRunId, 500);
-        if (mounted) setItems(data.items || []);
+        // const data = await getCodesByPrintRun(printRunId, 500);
+        // const arr = (data.items || []).map(it => ({ ...it }));
+                const data = await getCodesByPrintRun(printRunId, 500);
+        // Normalize HC immediately so all UI paths render the same value
+        const arr = (data.items || []).map(it => ({
+          ...it,
+          human_code: pickHumanCode(it),
+       }));
+        if (mounted) setItems(arr);
       } catch (e) {
         if (mounted)
           setErr(e?.response?.data?.message || e.message || "Failed to load QR codes.");
@@ -111,12 +193,9 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
       }
     }
     load();
-    return () => {
-      mounted = false;
-    };
+    return () => { mounted = false; };
   }, [open, printRunId]);
 
-  // Determine run type
   const inferredType = useMemo(() => {
     if (!items.length) return "standard";
     const hasParent = items.some((r) => r.role === "parent");
@@ -126,20 +205,18 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
 
   const effectiveType = mode === "auto" ? inferredType : mode;
 
-  // After items load, set a sensible default layout
   useEffect(() => {
     if (!items.length) return;
     const hasParent = items.some((r) => r.role === "parent");
     const hasPart = items.some((r) => r.role === "part");
     const isComposite = hasParent || hasPart;
     if (mode === "auto") {
-      setGrouped(isComposite); // composite => grouped by default; standard => flat
+      setGrouped(isComposite);
       setFilter("all");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items]);
 
-  // Fetch assemblies for each root (when composite + grouped)
   useEffect(() => {
     let cancel = false;
     async function fetchAssemblies() {
@@ -163,17 +240,13 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
         }
       } catch (e) {
         if (!cancel)
-          setErr(
-            e?.response?.data?.message || e.message || "Failed to load assemblies."
-          );
+          setErr(e?.response?.data?.message || e.message || "Failed to load assemblies.");
       } finally {
         if (!cancel) setLoading(false);
       }
     }
     fetchAssemblies();
-    return () => {
-      cancel = true;
-    };
+    return () => { cancel = true; };
   }, [effectiveType, grouped, items]);
 
   const buildUrl = (token, channel) => {
@@ -191,17 +264,15 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
     }
   };
 
-  // Simple filters for STANDARD
   const stdFiltered = items.filter((r) => {
-    if (filter === "bound") return r.is_bound === 1 || r.is_bound === true;
-    if (filter === "issued") return !r.is_bound;
-    return true; // all
+    if (filter === "bound") return isItemBound(r);
+    if (filter === "issued") return !isItemBound(r);
+    return true;
   });
 
-  // Filters for COMPOSITE (flat list)
   const flatFiltered = items.filter((r) => {
-    if (filter === "bound") return r.is_bound === 1 || r.is_bound === true;
-    if (filter === "issued") return !r.is_bound;
+    if (filter === "bound") return isItemBound(r);
+    if (filter === "issued") return !isItemBound(r);
     if (filter === "parents") return r.role === "parent";
     if (filter === "parts") return r.role === "part";
     if (filter === "bom_missing") return r.role === "parent" && r.comp_ok === false;
@@ -249,13 +320,12 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
     compReq,
     parentUid,
     isBound,
-    composite = false, // standard view hides role/BOM/UNASSIGNED
+    composite = false,
   }) => {
     const hasToken = !!token;
     const url = hasToken ? buildUrl(token, channel) : null;
     const shortPath = hasToken ? url.replace(getVerifyBase(), "") : "";
 
-    // Only show these in composite mode
     const isParent = composite && role === "parent";
     const showRoleChip = composite;
     const showAssemblyLine = composite;
@@ -290,19 +360,16 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
           border: isBound ? "1px solid #cfead8" : "1px solid #ffd4d9",
         }}
       >
-        {/* role chip (ROOT/PART) only for composite */}
         {showRoleChip && (
           <div style={{ position: "absolute", top: 8, left: 8 }}>
             <Chip text={isParent ? "ROOT" : "PART"} tone={isParent ? "parent" : "part"} />
           </div>
         )}
 
-        {/* bound/issued chip always */}
         <div style={{ position: "absolute", top: 8, right: 8 }}>
           <Chip text={isBound ? "BOUND" : "ISSUED"} tone={isBound ? "ok" : "danger"} />
         </div>
 
-        {/* QR + copy; fallback if no token */}
         <div style={{ position: "relative", display: "inline-block" }}>
           {hasToken ? (
             <>
@@ -313,7 +380,7 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
                     size="small"
                     onClick={(e) => {
                       e.stopPropagation();
-                      copy(url);
+                      navigator.clipboard.writeText(url);
                     }}
                     sx={{ background: "#fff", boxShadow: 1 }}
                   >
@@ -338,15 +405,12 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
           )}
         </div>
 
-        {/* Lines */}
         <MDTypography
           variant="caption"
           color="text"
           display="block"
           mt={1}
-          sx={{
-            fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-          }}
+          sx={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" }}
         >
           {(sku || "—")} • {(batch || "—")} • {seq ? `#${seq}` : ""}
         </MDTypography>
@@ -355,9 +419,7 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
             variant="caption"
             color="text"
             display="block"
-            sx={{
-              fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-            }}
+            sx={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" }}
           >
             HC: {human}
           </MDTypography>
@@ -366,14 +428,12 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
           Device: {deviceUid || "—"}
         </MDTypography>
 
-        {/* BOM / UNASSIGNED line — only for composite */}
         {showAssemblyLine && (
           <MDBox mt={0.5}>
             <Chip text={bomLabel} tone={bomTone} />
           </MDBox>
         )}
 
-        {/* URL row */}
         {hasToken && (
           <MDBox
             mt={0.75}
@@ -402,7 +462,7 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
                 size="small"
                 onClick={(e) => {
                   e.stopPropagation();
-                  copy(url);
+                  navigator.clipboard.writeText(url);
                 }}
               >
                 <Icon fontSize="small">content_copy</Icon>
@@ -414,7 +474,6 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
     );
   };
 
-  // Build grouped cards: one ROOT tile + a grid of PART tiles (from /devices/{root}/assembly?with_qr=1)
   const GroupedComposite = () => {
     const roots = items.filter((r) => r.role === "parent");
     if (!roots.length)
@@ -432,22 +491,21 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
                 Root: {root.sku} · {root.device_uid || "—"}
               </MDTypography>
               <MDBox sx={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 16 }}>
-                {/* Root tile */}
                 <QrTile
                   token={root.token}
                   channel={root.channel}
                   sku={root.sku}
                   batch={root.batch}
                   seq={root.seq_in_run}
-                  human={root.human_code}
+                  // human={root.human_code}
+                  human={pickHumanCode(root)}
                   deviceUid={root.device_uid}
                   role="parent"
                   compCount={root.comp_count || 0}
                   compReq={root.comp_required || 0}
-                  isBound={!!root.is_bound}
+                  isBound={isItemBound(root)}
                   composite
                 />
-                {/* Parts under this root */}
                 <div>
                   <MDTypography variant="subtitle2" mb={1}>
                     Parts linked to this root
@@ -465,7 +523,7 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
                       }}
                     >
                       {children.map((ch, idx) => {
-                        const token = ch.qr_token || ""; // may be null if device has no QR
+                        const token = ch.qr_token || "";
                         return (
                           <QrTile
                             key={`${root.device_uid}_${idx}`}
@@ -474,13 +532,14 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
                             sku={ch.sku}
                             batch={null}
                             seq={null}
-                            human={null}
+                            // human={null}
+                            human={pickHumanCode(ch)}
                             deviceUid={ch.device_uid}
                             role="part"
                             compCount={0}
                             compReq={0}
                             parentUid={root.device_uid}
-                            isBound={!!token}
+                            isBound={!!token || isItemBound(ch)}
                             composite
                           />
                         );
@@ -507,7 +566,6 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
         )}
         {loading && <LinearProgress />}
 
-        {/* Mode selector */}
         <MDBox mb={1} sx={{ display: "flex", alignItems: "center", gap: 2 }}>
           <MDTypography variant="button">View as:</MDTypography>
           <Tabs
@@ -530,7 +588,6 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
           )}
         </MDBox>
 
-        {/* Filters (hide in grouped composite) */}
         {(effectiveType !== "composite" || !grouped) && (
           <MDBox mt={1} mb={1} sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
             {(effectiveType === "standard"
@@ -562,7 +619,6 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
           </MDBox>
         )}
 
-        {/* BODY */}
         {effectiveType === "composite" && grouped ? (
           <GroupedComposite />
         ) : (
@@ -578,13 +634,14 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
                 sku={r.sku}
                 batch={r.batch}
                 seq={r.seq_in_run}
-                human={r.human_code}
+                // human={r.human_code}
+                human={pickHumanCode(r)}
                 deviceUid={r.device_uid}
                 role={r.role}
                 compCount={r.comp_count || 0}
                 compReq={r.comp_required || 0}
                 parentUid={r.parent_device_uid}
-                isBound={!!r.is_bound}
+                isBound={isItemBound(r)}
                 composite={effectiveType === "composite"}
               />
             ))}
@@ -645,9 +702,7 @@ function BatchesDialog({ open, onClose, product }) {
       }
     }
     load();
-    return () => {
-      mounted = false;
-    };
+    return () => { mounted = false; };
   }, [open, product]);
 
   async function viewRuns(batch) {
@@ -839,29 +894,6 @@ function MintDialog({ open, onClose, product }) {
       setLoading(false);
     }
   }
-
-  // NEW: One-click composite cascade (root + all BOM parts)
-  async function onCascade() {
-    setErr("");
-    setLoading(true);
-    try {
-      const payload = {
-        root_sku: product?.sku,
-        roots_qty: Number(qty) || 1,
-        channel_code: channel.trim(),
-        batch_code: batch.trim() || undefined,
-        print_vendor: vendor.trim() || undefined,
-      };
-      const data = await compositeMintAssemble(payload);
-      setResult({ print_run_id: data.print_run_id, issued: undefined });
-      setPreviewOpen(true);
-    } catch (e) {
-      setErr(e?.response?.data?.message || e.message || "Composite cascade failed.");
-    } finally {
-      setLoading(false);
-    }
-  }
-
   const isComposite = (product?.type || "").toLowerCase() === "composite";
 
   return (
@@ -923,168 +955,13 @@ function MintDialog({ open, onClose, product }) {
         <MDButton variant="outlined" color="secondary" onClick={onClose}>
           Close
         </MDButton>
-        {/* Normal mint (labels only for this SKU) */}
         <MDButton variant="gradient" color="info" onClick={onMint} disabled={loading}>
           <Icon sx={{ mr: 0.5 }}>qr_code_2</Icon> {loading ? "Generating…" : "Generate"}
         </MDButton>
-        {/* Composite Cascade */}
-        {isComposite && (
-          <MDButton variant="gradient" color="warning" onClick={onCascade} disabled={loading}>
-            <Icon sx={{ mr: 0.5 }}>account_tree</Icon> Cascade parts & assemble
-          </MDButton>
-        )}
       </DialogActions>
 
       <QrPreviewDialog open={previewOpen} onClose={() => setPreviewOpen(false)} printRunId={result?.print_run_id} />
     </Dialog>
-  );
-}
-
-/* =========================
-   Bulk QR mint (Excel/CSV)
-   ========================= */
-function BulkMintPanel() {
-  const [rows, setRows] = useState([]);
-  const [err, setErr] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [progress, setProgress] = useState({ done: 0, total: 0 });
-  const fileRef = useRef(null);
-
-  function parseWorkbook(wb) {
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const json = XLSX.utils.sheet_to_json(ws, { defval: "" });
-    const norm = json
-      .map((r) => {
-        const o = {};
-        for (const k of Object.keys(r)) o[String(k).trim().toLowerCase()] = r[k];
-        return {
-          sku: String(o.sku || "").trim(),
-          qty: Number(o.qty || o.quantity || 0),
-          channel_code: String(o.channel || o.channel_code || "WEB").trim(),
-          batch_code: String(o.batch || o.batch_code || "").trim() || undefined,
-          print_vendor: String(o.vendor || o.print_vendor || "").trim() || undefined,
-          micro_mode: String(o.micro_mode || "hmac16").trim(),
-        };
-      })
-      .filter((r) => r.sku && r.qty > 0);
-    return norm;
-  }
-
-  async function onFile(e) {
-    setErr("");
-    setRows([]);
-    try {
-      const f = e.target.files?.[0];
-      if (!f) return;
-      const buf = await f.arrayBuffer();
-      const wb = XLSX.read(buf);
-      const norm = parseWorkbook(wb);
-      if (!norm.length) throw new Error("No valid rows found (need columns: sku, qty, channel_code).");
-      setRows(norm);
-    } catch (ex) {
-      setErr(ex.message || "Failed to parse file.");
-    }
-  }
-
-  function downloadTemplate() {
-    const data = [
-      ["sku", "qty", "channel_code", "batch_code", "print_vendor", "micro_mode"],
-      ["SKU-001", "1000", "WEB", "B24-09", "Shree Labels", "hmac16"],
-    ];
-    const ws = XLSX.utils.aoa_to_sheet(data);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Template");
-    XLSX.writeFile(wb, "qr_bulk_template.xlsx");
-  }
-
-  async function run() {
-    setErr("");
-    if (!rows.length) return;
-    setBusy(true);
-    setProgress({ done: 0, total: rows.length });
-    try {
-      let done = 0;
-      for (const r of rows) {
-        try {
-          await mintProductCodes(r.sku, {
-            qty: r.qty,
-            channel_code: r.channel_code,
-            batch_code: r.batch_code,
-            micro_mode: r.micro_mode || "hmac16",
-            create_print_run: true,
-            print_vendor: r.print_vendor,
-          });
-        } catch (e) {
-          console.error("Row failed", r, e);
-        } finally {
-          done += 1;
-          setProgress({ done, total: rows.length });
-        }
-      }
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <MDBox p={3}>
-      {err && (
-        <MDTypography color="error" variant="button" mb={2} display="block">
-          {err}
-        </MDTypography>
-      )}
-      <MDBox display="flex" alignItems="center" gap={1} mb={2}>
-        <input type="file" accept=".xlsx,.xls,.csv" onChange={onFile} ref={fileRef} style={{ display: "none" }} />
-        <MDButton variant="outlined" color="info" onClick={() => fileRef.current?.click()}>
-          <Icon sx={{ mr: 0.5 }}>upload</Icon> Upload Excel / CSV
-        </MDButton>
-        <MDButton variant="text" color="info" onClick={downloadTemplate}>
-          <Icon sx={{ mr: 0.5 }}>download</Icon> Download Template
-        </MDButton>
-      </MDBox>
-
-      {rows.length > 0 && (
-        <MDBox>
-          <MDTypography variant="button" fontWeight="medium" mb={1} display="block">
-            Preview ({rows.length} rows)
-          </MDTypography>
-          <MDBox sx={{ maxHeight: 320, overflow: "auto", border: "1px solid rgba(0,0,0,.08)", borderRadius: 1 }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  <th style={{ padding: 8, textAlign: "left" }}>SKU</th>
-                  <th style={{ padding: 8, textAlign: "right" }}>Qty</th>
-                  <th style={{ padding: 8, textAlign: "left" }}>Channel</th>
-                  <th style={{ padding: 8, textAlign: "left" }}>Batch</th>
-                  <th style={{ padding: 8, textAlign: "left" }}>Vendor</th>
-                  <th style={{ padding: 8, textAlign: "left" }}>Micro</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r, i) => (
-                  <tr key={i} style={{ borderTop: "1px solid rgba(0,0,0,.05)" }}>
-                    <td style={{ padding: 8 }}>{r.sku}</td>
-                    <td style={{ padding: 8, textAlign: "right" }}>{r.qty}</td>
-                    <td style={{ padding: 8 }}>{r.channel_code}</td>
-                    <td style={{ padding: 8 }}>{r.batch_code || "—"}</td>
-                    <td style={{ padding: 8 }}>{r.print_vendor || "—"}</td>
-                    <td style={{ padding: 8 }}>{r.micro_mode || "hmac16"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </MDBox>
-
-          <MDBox mt={2}>
-            {busy && <LinearProgress />}
-            <MDButton variant="gradient" color="info" onClick={run} disabled={busy}>
-              <Icon sx={{ mr: 0.5 }}>qr_code_2</Icon>{" "}
-              {busy ? `Generating… ${progress.done}/${progress.total}` : "Generate QR for all"}
-            </MDButton>
-          </MDBox>
-        </MDBox>
-      )}
-    </MDBox>
   );
 }
 
@@ -1101,18 +978,79 @@ function BindDevicesPanel({ products, labelStatsMap }) {
   const [result, setResult] = useState(null);
   const fileRef = useRef(null);
 
+  // NEW: cache per-SKU label stats fetched on-demand (for SKUs present in the uploaded file)
+  const [extraStats, setExtraStats] = useState({}); // { [sku]: {available,...} }
+
   const productOptions = useMemo(
     () => (products || []).map((p) => ({ sku: p.sku, name: p.name })),
     [products]
   );
 
-  const availableForSku = sku ? labelStatsMap[sku]?.available ?? 0 : 0;
-  const shortage = allocate ? Math.max(0, rows.length - availableForSku) : 0;
+  // bindable rows are those with their own device_uid
+  const bindableRows = useMemo(() => rows.filter((r) => !!r.device_uid), [rows]);
+
+  // availability per selected SKU (for the caption)
+  const availableForSku = sku ? (labelStatsMap[sku]?.available ?? 0) : 0;
+
+  // count uploaded rows per SKU (one-file composite or legacy single-SKU)
+  const hasSkuInRows = rows.some((r) => !!r.sku);
+  const countsBySku = useMemo(() => {
+    const m = {};
+    if (!rows.length) return m;
+    if (hasSkuInRows) {
+      rows.forEach((r) => {
+        const s = r.sku || "";
+        if (!s) return;
+        m[s] = (m[s] || 0) + 1;
+      });
+    } else if (sku) {
+      m[sku] = rows.length; // legacy single-SKU file
+    }
+    return m;
+  }, [rows, hasSkuInRows, sku]);
+
+  const getAvailFor = (s) =>
+    (labelStatsMap[s]?.available ?? (extraStats[s]?.available ?? 0));
+
+  // Shortage across all SKUs in the file
+  const shortage = useMemo(() => {
+    if (!allocate) return 0;
+    let short = 0;
+    for (const [s, cnt] of Object.entries(countsBySku)) {
+      const avail = getAvailFor(s) || 0;
+      if (cnt > avail) short += (cnt - avail);
+    }
+    return short;
+  }, [allocate, countsBySku, extraStats, labelStatsMap]);
+
+  // Fetch missing per-SKU label stats for SKUs we see in the file
+  useEffect(() => {
+    const needed = Object.keys(countsBySku)
+      .filter((s) => s && labelStatsMap[s] == null && extraStats[s] == null);
+    if (!needed.length) return;
+    let cancelled = false;
+    (async () => {
+      const entries = await Promise.all(
+        needed.map(async (s) => {
+          try { const d = await getLabelStats(s); return [s, d]; }
+          catch { return [s, { available: 0, bound: 0, total: 0 }]; }
+        })
+      );
+      if (!cancelled) {
+        setExtraStats((prev) => Object.fromEntries([
+          ...Object.entries(prev), ...entries
+        ]));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [countsBySku, labelStatsMap, extraStats]);
 
   function downloadTemplate() {
+    // Add 'sku' column so one-file composite binding just works
     const data = [
-      ["device_uid", "serial", "imei", "mac", "mfg_date", "token"],
-      ["DEV-0001", "SER-0001", "356789012345678", "00:11:22:33:44:55", "2025-09-20", ""], // leave token blank if allocate=true
+      ["sku", "device_uid", "serial", "imei", "mac", "mfg_date", "token", "parent_device_uid"],
+      ["BK-01", "BIKE-0001", "SER-ROOT-001", "", "", "2025-09-24", "", ""],
+      ["EN-01", "ENGINE-0001", "SER-EN-001", "", "", "2025-09-24", "", "BIKE-0001"],
     ];
     const ws = XLSX.utils.aoa_to_sheet(data);
     const wb = XLSX.utils.book_new();
@@ -1120,26 +1058,56 @@ function BindDevicesPanel({ products, labelStatsMap }) {
     XLSX.writeFile(wb, "device_bind_template.xlsx");
   }
 
-  function parseWorkbook(wb) {
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const json = XLSX.utils.sheet_to_json(ws, { defval: "" });
-    const norm = json
-      .map((r) => {
-        const low = {};
-        for (const k of Object.keys(r)) low[String(k).trim().toLowerCase()] = r[k];
-        const uid = String(low.device_uid || low.uid || low.serial || "").trim();
-        const token = String(low.token || "").trim() || undefined;
-        const attrs = {};
-        for (const [k, v] of Object.entries(low)) {
-          if (["device_uid", "uid", "serial", "token"].includes(k)) continue;
-          attrs[k] = v;
-        }
-        return { device_uid: uid, token, attrs };
-      })
-      .filter((r) => r.device_uid);
-    return norm;
-  }
+//   function parseWorkbook(wb) {
+//     const ws = wb.Sheets[wb.SheetNames[0]];
+//     const json = XLSX.utils.sheet_to_json(ws, { defval: "" });
+//     const norm = json.map((r) => {
+//       const low = {};
+//       for (const k of Object.keys(r)) low[String(k).trim().toLowerCase()] = r[k];
+//       const uid = String(low.device_uid || low.uid || low.serial || "").trim();
+//       const token = String(low.token || "").trim() || undefined;
+//       const parent = String(low.parent_device_uid || low.parent || "").trim();
+//       const sku = String(low.sku || low.product || low.product_sku || "").trim();
+//       const attrs = {};
+//       for (const [k, v] of Object.entries(low)) {
+//         if (["sku","product","product_sku","device_uid","uid","serial","token","parent_device_uid","parent"].includes(k)) continue;
+//         attrs[k] = v;
+//       }
+//       return { sku: sku || undefined, device_uid: uid, token, attrs, parent_device_uid: parent || undefined };
+//     });
+//     return norm;
+//   }
 
+ function parseWorkbook(wb) {
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const json = XLSX.utils.sheet_to_json(ws, { defval: "" });
+
+  const norm = json.map((r) => {
+    const low = {};
+    for (const k of Object.keys(r)) low[String(k).trim().toLowerCase()] = r[k];
+
+    const uid    = String(low.device_uid || low.uid || low.serial || "").trim();
+    const token  = String(low.token || "").trim() || undefined;
+    const parent = String(low.parent_device_uid || low.parent || "").trim();
+    const sku    = String(low.sku || low.product || low.product_sku || "").trim();
+
+    const attrs = {};
+    for (const [k, v] of Object.entries(low)) {
+      if (["sku","product","product_sku","device_uid","uid","serial","token","parent_device_uid","parent"].includes(k)) continue;
+      attrs[k] = v;
+    }
+
+    return {
+      sku: sku || undefined,
+      device_uid: uid,
+      parent_device_uid: parent || undefined,
+      token,
+      attrs,
+    };
+  });
+
+  return norm;
+}
   async function onFile(e) {
     setErr("");
     setRows([]);
@@ -1151,7 +1119,7 @@ function BindDevicesPanel({ products, labelStatsMap }) {
       const wb = XLSX.read(buf);
       const norm = parseWorkbook(wb);
       if (!norm.length)
-        throw new Error("No valid rows found. Need 'device_uid'. If Auto-allocate is OFF, include 'token'.");
+        throw new Error("No valid rows found. Need 'device_uid'. If Auto-allocate is OFF, include 'token'. Optional: 'sku' and 'parent_device_uid' for composite.");
       setRows(norm);
     } catch (ex) {
       setErr(ex.message || "Failed to parse file.");
@@ -1177,20 +1145,60 @@ function BindDevicesPanel({ products, labelStatsMap }) {
       }
     }
     if (allocate && shortage > 0) {
+      // Build a per-SKU breakdown to help the operator mint the right SKUs
+      const parts = Object.entries(countsBySku).map(([s, cnt]) => {
+        const avail = getAvailFor(s) || 0;
+        const need = Math.max(0, cnt - avail);
+        return need > 0 ? `${s}: short ${need} (need ${cnt}, avail ${avail})` : null;
+      }).filter(Boolean);
       setErr(
-        `Not enough available labels for ${sku}. Need ${rows.length}, available ${availableForSku}. Use "Generate QR" to mint more.`
+        `Not enough available labels across all SKUs. ${parts.join(" • ")}. Use "By Product → Generate QR" to mint more.`
       );
       return;
     }
 
     setBusy(true);
     try {
-      const payload = {
-        allocate,
-        batch_code: batchCode || undefined,
-        devices: rows.map((r) => ({ device_uid: r.device_uid, token: r.token, attrs: r.attrs })),
-      };
+      // Send one-file composite payload: sku + parent_device_uid per row
+    //   const payload = {
+    //     allocate,
+    //     batch_code: batchCode || undefined,
+    //     devices: rows.map((r) => ({
+    //       sku: r.sku || undefined,
+    //       device_uid: (r.device_uid || r.parent_device_uid),
+    //       parent_device_uid: r.parent_device_uid || undefined,
+    //       token: r.token,
+    //       attrs: r.attrs,
+    //     })),
+    //   };
+
+    const payload = {
+  allocate,
+  batch_code: batchCode || undefined,
+  devices: rows.map((r) => ({
+    sku: r.sku || undefined,                       // <-- IMPORTANT
+    device_uid: (r.device_uid || r.parent_device_uid),
+    parent_device_uid: r.parent_device_uid || undefined,
+    token: r.token,
+    attrs: r.attrs,
+  })),
+};
+
       const data = await bulkBindDevices(sku, payload);
+
+      // Interlink parent↔children if parent_device_uid provided (idempotent backend)
+      const parentMap = new Map();
+      for (const r of rows) {
+        if (r.parent_device_uid && r.device_uid) {
+          const arr = parentMap.get(r.parent_device_uid) || [];
+          arr.push(r.device_uid);
+          parentMap.set(r.parent_device_uid, arr);
+        }
+      }
+      for (const [parentUid, children] of parentMap.entries()) {
+        try { await linkAssembly(parentUid, children); } catch { /* ignore linking errors */ }
+      }
+
       setResult(data);
     } catch (e) {
       setErr(e?.response?.data?.message || e.message || "Bind failed.");
@@ -1252,16 +1260,18 @@ function BindDevicesPanel({ products, labelStatsMap }) {
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr>
-                  <th style={{ padding: 8, textAlign: "left" }}>device_uid</th>
+                  <th style={{ padding: 8, textAlign: "left" }}>device_uid (effective)</th>
                   <th style={{ padding: 8, textAlign: "left" }}>token</th>
+                  <th style={{ padding: 8, textAlign: "left" }}>parent_device_uid</th>
                   <th style={{ padding: 8, textAlign: "left" }}>attrs…</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((r, i) => (
                   <tr key={i} style={{ borderTop: "1px solid rgba(0,0,0,.05)" }}>
-                    <td style={{ padding: 8 }}>{r.device_uid}</td>
+                    <td style={{ padding: 8 }}>{r.device_uid || r.parent_device_uid}</td>
                     <td style={{ padding: 8 }}>{r.token || (allocate ? "⟶ auto" : "—")}</td>
+                    <td style={{ padding: 8 }}>{r.parent_device_uid || "—"}</td>
                     <td style={{ padding: 8 }}>
                       {Object.keys(r.attrs || {}).length ? JSON.stringify(r.attrs) : "—"}
                     </td>
@@ -1273,8 +1283,7 @@ function BindDevicesPanel({ products, labelStatsMap }) {
 
           {allocate && shortage > 0 && (
             <MDTypography variant="caption" color="error" mt={1} display="block">
-              Not enough available labels. Short by <b>{shortage}</b>. Go to <b>By Product → Generate QR</b> to mint
-              more.
+              Not enough available labels across all SKUs. Short by <b>{shortage}</b>. Use <b>By Product → Generate QR</b> to mint more.
             </MDTypography>
           )}
 
@@ -1299,7 +1308,7 @@ function BindDevicesPanel({ products, labelStatsMap }) {
                     <table style={{ width: "100%", borderCollapse: "collapse" }}>
                       <thead>
                         <tr style={{ background: "rgba(0,0,0,.02)" }}>
-                          <th style={{ padding: 8, textAlign: "left" }}>device_uid</th>
+                          <th style={{ padding: 8, textAlign: "left" }}>device_uid (effective)</th>
                           <th style={{ padding: 8, textAlign: "left" }}>missing</th>
                         </tr>
                       </thead>
@@ -1338,15 +1347,14 @@ export default function GenerateQrPage() {
 
   const query = useQuery();
   useEffect(() => {
-    const t = query.get("tab") || "";
-    if (t === "bulk") setTab(1);
-    if (t === "bind") setTab(2);
+    const t = query.get("tab") || ""; if (t === "bind") setTab(1);
   }, []); // run once on mount
 
   async function refresh() {
     setLoading(true);
     setErr("");
     try {
+      // Keep root_only=1 so By Product shows roots; Bind panel fetches per-SKU stats on demand
       const data = await listProducts({ root_only: 1 });
       const items = Array.isArray(data) ? data : data?.items || [];
       setProducts(items);
@@ -1356,16 +1364,12 @@ export default function GenerateQrPage() {
       setLoading(false);
     }
   }
-  useEffect(() => {
-    refresh();
-  }, []);
+  useEffect(() => { refresh(); }, []);
 
-  // Load plan stats (limits)
   useEffect(() => {
     getQrPlanStats().then(setStats).catch(() => {});
   }, []);
 
-  // Load label stats per product (limit to first N if needed)
   useEffect(() => {
     let mounted = true;
     async function loadStats() {
@@ -1387,9 +1391,7 @@ export default function GenerateQrPage() {
       if (mounted) setLabelStats(Object.fromEntries(entries));
     }
     loadStats();
-    return () => {
-      mounted = false;
-    };
+    return () => { mounted = false; };
   }, [products]);
 
   const table = useMemo(() => {
@@ -1459,7 +1461,6 @@ export default function GenerateQrPage() {
                 )}
                 <Tabs value={tab} onChange={(_, v) => setTab(v)}>
                   <Tab label="By Product" />
-                  <Tab label="Bulk QR Mint" />
                   <Tab label="Bind Devices" />
                 </Tabs>
               </MDBox>
@@ -1482,11 +1483,8 @@ export default function GenerateQrPage() {
                 </MDBox>
               )}
 
-              {/* Bulk QR mint */}
-              {tab === 1 && <BulkMintPanel />}
-
               {/* Bind Devices */}
-              {tab === 2 && <BindDevicesPanel products={products} labelStatsMap={labelStats} />}
+              {tab === 1 && <BindDevicesPanel products={products} labelStatsMap={labelStats} />}
             </Card>
           </Grid>
         </Grid>
