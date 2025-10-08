@@ -60,7 +60,7 @@ function base32CrockfordFromBytes(bytes, outLen = 12) {
   return out;
 }
 
-// Derive 13-char HC from the first 8 bytes of micro_hex (which represents micro_chk 16 bytes)
+// Derive 12-char HC from the first 8 bytes of micro_hex (which represents micro_chk 16 bytes)
 function hcFromMicroHex(microHex) {
   if (!microHex || typeof microHex !== "string") return null;
   const hex = microHex.replace(/[^0-9a-f]/gi, "").slice(0, 16); // 8 bytes (16 hex chars)
@@ -327,7 +327,8 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
        // Prefer server-rendered PNG (includes covert watermark). Fallback to client QR if it fails.
     // const serverPng = hasToken ? `${getVerifyBase()}/qr/${encodeURIComponent(token)}.png${channel ? `?ch=${encodeURIComponent(channel)}` : ""}` : null;
     
-const size = 160; // small, crisp preview
+// const size = 160; // small, crisp preview
+const size = 148; // match <img> width/height below
  const qs = new URLSearchParams();
  if (channel) qs.set("ch", channel);
  qs.set("w", String(size));  // ask backend for a small PNG
@@ -386,8 +387,10 @@ const size = 160; // small, crisp preview
              {serverPng ? (
                 <img
                   src={serverPng}
-                  width={148}
-                  height={148}
+                  // width={148}
+                  // height={148}
+                  width={size}
+                  height={size}
                   alt="QR"
                   loading="lazy"
                   decoding="async"
@@ -405,7 +408,7 @@ const size = 160; // small, crisp preview
               </div>
 
               {/* Micro-QR overlay (HC string) */}
-              {human && (
+              {human && role === "parent" && (
                 <div style={{ position: "absolute", right: 4, bottom: 4, background: "#fff", padding: 2, borderRadius: 4 }}>
                   <QRCode value={human} size={44} />
                 </div>
