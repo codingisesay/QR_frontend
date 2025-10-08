@@ -49,7 +49,7 @@ import {
 +   Human/Micro code helpers
 +   ========================= */
 // Crockford Base32 (readable; avoids O/0 and I/1) — used ONLY as fallback if server didn't send human_code
-function base32CrockfordFromBytes(bytes, outLen = 13) {
+function base32CrockfordFromBytes(bytes, outLen = 12) {
   const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
   let bits = "";
   for (const b of bytes) bits += b.toString(2).padStart(8, "0");
@@ -60,14 +60,14 @@ function base32CrockfordFromBytes(bytes, outLen = 13) {
   return out;
 }
 
-// Derive 13-char HC from the first 8 bytes of micro_hex (which represents micro_chk 16 bytes)
+// Derive 12-char HC from the first 8 bytes of micro_hex (which represents micro_chk 16 bytes)
 function hcFromMicroHex(microHex) {
   if (!microHex || typeof microHex !== "string") return null;
   const hex = microHex.replace(/[^0-9a-f]/gi, "").slice(0, 16); // 8 bytes (16 hex chars)
   if (hex.length < 2) return null;
   const bytes = [];
   for (let i = 0; i < hex.length; i += 2) bytes.push(parseInt(hex.slice(i, i + 2), 16));
-  return base32CrockfordFromBytes(bytes, 13);
+  return base32CrockfordFromBytes(bytes, 12);
 }
 
 // Prefer server-provided code; fall back to alternate field names; last resort derive from micro_hex
@@ -324,6 +324,16 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
   }) => {
     const hasToken = !!token;
     const url = hasToken ? buildUrl(token, channel) : null;
+       // Prefer server-rendered PNG (includes covert watermark). Fallback to client QR if it fails.
+    // const serverPng = hasToken ? `${getVerifyBase()}/qr/${encodeURIComponent(token)}.png${channel ? `?ch=${encodeURIComponent(channel)}` : ""}` : null;
+    
+// const size = 160; // small, crisp preview
+const size = 148; // match <img> width/height below
+ const qs = new URLSearchParams();
+ if (channel) qs.set("ch", channel);
+ qs.set("w", String(size));  // ask backend for a small PNG
+ const serverPng = hasToken ? `${getVerifyBase()}/qr/${encodeURIComponent(token)}.png?${qs.toString()}` : null;
+
     const shortPath = hasToken ? url.replace(getVerifyBase(), "") : "";
 
     const isParent = composite && role === "parent";
@@ -373,7 +383,36 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
         <div style={{ position: "relative", display: "inline-block" }}>
           {hasToken ? (
             <>
-              <QRCode value={url} size={148} />
+              {/* <QRCode value={url} size={148} /> */}
+             {serverPng ? (
+                <img
+                  src={serverPng}
+                  // width={148}
+                  // height={148}
+                  width={size}
+                  height={size}
+                  alt="QR"
+                  loading="lazy"
+                  decoding="async"
+                  fetchpriority="low"
+                  onError={(e) => {
+                    // graceful fallback to client-side QR
+                    e.currentTarget.style.display = "none";
+                    const fallback = e.currentTarget.parentElement.querySelector(".__qr_fallback");
+                    if (fallback) fallback.style.display = "block";
+                  }}
+                />
+              ) : null}
+              <div className="__qr_fallback" style={{ display: serverPng ? "none" : "block" }}>
+                <QRCode value={url} size={148} />
+              </div>
+
+              {/* Micro-QR overlay (HC string) */}
+              {human && role === "parent" && (
+                <div style={{ position: "absolute", right: 4, bottom: 4, background: "#fff", padding: 2, borderRadius: 4 }}>
+                  <QRCode value={human} size={44} />
+                </div>
+              )}
               <div style={{ position: "absolute", right: 4, bottom: 4 }}>
                 <Tooltip title="Copy verify URL">
                   <IconButton
