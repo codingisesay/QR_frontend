@@ -23,6 +23,13 @@ export async function getBatchesByProduct(idOrSku, limit = 50, page = 1) {
   return data; // { items, ... }
 }
 
+// availability for product (optionally filtered by batch_code)
+export async function getAvailabilityByProductBatch(idOrSku, batchCode) {
+  const params = batchCode ? { batch_code: batchCode } : {};
+  const { data } = await client.get(`/products/${encodeURIComponent(idOrSku)}/availability`, { params });
+  return data || { available: 0, issued: 0, bound: 0 };
+}
+
 /**
  * List runs in a batch
  */
@@ -151,4 +158,15 @@ export async function getAssembly(deviceUid, withQr = true) {
     { params: withQr ? { with_qr: 1 } : {} }
   );
   return data; // { parent, children: [...], ... }
+}
+
+export async function getTenantSettings() {
+  // Expect backend to return an object keyed by `key` with parsed JSON values, e.g.:
+  // {
+  //   "verification.default_mode": {"mode": "qr_nfc"},
+  //   "nfc.key.current": {"key_ref": "DEFAULT-20251017-PURT"},
+  //   "puf.policy": {"require_puf_for_authentic": false, "alg": "ORBv1", "threshold": 85}
+  // }
+  const { data } = await client.get("/tenant/settings");
+  return data || {};
 }

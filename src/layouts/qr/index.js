@@ -1,3 +1,4 @@
+// src/layouts/qr/index.js
 import { useEffect, useMemo, useState, useRef } from "react";
 import * as XLSX from "xlsx";
 import QRCode from "react-qr-code";
@@ -23,6 +24,7 @@ import { IconButton, Tooltip, Snackbar } from "@mui/material";
 import MDBox from "components/MDBox";
 import MDTypography from "components/MDTypography";
 import MDInput from "components/MDInput";
+import MDSelect from "components/MDSelect";
 import MDButton from "components/MDButton";
 
 // Layout
@@ -42,35 +44,30 @@ import {
   getCodesByPrintRun,           // preview helper
   linkAssembly,                 // parent↔children linking
 } from "api/qr";
+import { getTenantSettings } from "api/qr";   // NEW: tenant defaults for mint
 
-
- 
 /* =========================
 +   Human/Micro code helpers
 +   ========================= */
-// Crockford Base32 (readable; avoids O/0 and I/1) — used ONLY as fallback if server didn't send human_code
+
 function base32CrockfordFromBytes(bytes, outLen = 12) {
   const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
   let bits = "";
   for (const b of bytes) bits += b.toString(2).padStart(8, "0");
   let out = "";
   for (let i = 0; i + 5 <= bits.length && out.length < outLen; i += 5) {
-   out += alphabet[parseInt(bits.slice(i, i + 5), 2)];
+    out += alphabet[parseInt(bits.slice(i, i + 5), 2)];
   }
   return out;
 }
-
-// Derive 12-char HC from the first 8 bytes of micro_hex (which represents micro_chk 16 bytes)
 function hcFromMicroHex(microHex) {
   if (!microHex || typeof microHex !== "string") return null;
-  const hex = microHex.replace(/[^0-9a-f]/gi, "").slice(0, 16); // 8 bytes (16 hex chars)
+  const hex = microHex.replace(/[^0-9a-f]/gi, "").slice(0, 16);
   if (hex.length < 2) return null;
   const bytes = [];
   for (let i = 0; i < hex.length; i += 2) bytes.push(parseInt(hex.slice(i, i + 2), 16));
   return base32CrockfordFromBytes(bytes, 12);
 }
-
-// Prefer server-provided code; fall back to alternate field names; last resort derive from micro_hex
 function pickHumanCode(row) {
   const c =
     row?.human_code ||
@@ -82,8 +79,6 @@ function pickHumanCode(row) {
   const derived = hcFromMicroHex(row?.micro_hex);
   return derived ? derived.toUpperCase() : null;
 }
-
-
 
 /* Build the base for public verify URLs (e.g., http://127.0.0.1:8000) */
 function getVerifyBase() {
@@ -102,7 +97,7 @@ function getVerifyBase() {
   try {
     const base = client?.defaults?.baseURL || "";
     const u = new URL(base);
-    return `${u.protocol}//${u.host}`; // e.g., http://127.0.0.1:8000
+    return `${u.protocol}//${u.host}`;
   } catch {
     return window.location.origin.replace(/\/+$/, "");
   }
@@ -117,37 +112,26 @@ function useQuery() {
    Preview dialog (QR codes)
    ========================= */
 function QrPreviewDialog({ open, onClose, printRunId }) {
-  // Normalize 'bound' flag from various API shapes
   const isItemBound = (r) => {
     if (!r) return false;
-
-    // explicit bool/flag fields
     if (typeof r.is_bound !== "undefined") return r.is_bound === 1 || r.is_bound === true;
     if (typeof r.bound !== "undefined") return r.bound === 1 || r.bound === true;
     if (typeof r.bound_flag !== "undefined") return !!r.bound_flag;
-
-    // timestamp fields
     if (typeof r.bound_at !== "undefined") return !!r.bound_at;
     if (typeof r.bind_at !== "undefined") return !!r.bind_at;
     if (typeof r.boundOn !== "undefined") return !!r.boundOn;
     if (typeof r.boundAt !== "undefined") return !!r.boundAt;
-
-    // device linkage fields
     if (typeof r.device_uid !== "undefined") return !!r.device_uid;
     if (typeof r.deviceId !== "undefined") return !!r.deviceId;
     if (typeof r.device_id !== "undefined") return !!r.device_id;
     if (typeof r.bound_device_uid !== "undefined") return !!r.bound_device_uid;
     if (typeof r.linked_device_uid !== "undefined") return !!r.linked_device_uid;
-    if (typeof r.has_device !== "undefined") return !!r.has_device;
-
-    // status string
     if (typeof r.status === "string") {
       const st = r.status.toLowerCase();
       if (st === "bound" || st === "activated" || st === "active" || st === "linked") return true;
       if (st === "issued" || st === "new" || st === "unbound") return false;
       return st !== "issued";
     }
-
     if (r.token && (r.uid || r.uid_hex || r.serial)) return true;
     return false;
   };
@@ -157,9 +141,9 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
   const [err, setErr] = useState("");
   const [snack, setSnack] = useState("");
   const [filter, setFilter] = useState("all");
-  const [mode, setMode] = useState("auto"); // auto | standard | composite
-  const [grouped, setGrouped] = useState(true); // for composite: grouped vs flat
-  const [assemblies, setAssemblies] = useState({}); // { [parentUid]: { children:[...], coverage:{...} } }
+  const [mode, setMode] = useState("auto");
+  const [grouped, setGrouped] = useState(true);
+  const [assemblies, setAssemblies] = useState({});
 
   useEffect(() => {
     if (!open) return;
@@ -176,14 +160,11 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
       setLoading(true);
       setErr("");
       try {
-        // const data = await getCodesByPrintRun(printRunId, 500);
-        // const arr = (data.items || []).map(it => ({ ...it }));
-                const data = await getCodesByPrintRun(printRunId, 500);
-        // Normalize HC immediately so all UI paths render the same value
+        const data = await getCodesByPrintRun(printRunId, 500);
         const arr = (data.items || []).map(it => ({
           ...it,
           human_code: pickHumanCode(it),
-       }));
+        }));
         if (mounted) setItems(arr);
       } catch (e) {
         if (mounted)
@@ -255,15 +236,6 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
     return `${base}/v/${encodeURIComponent(token)}${ch}`;
   };
 
-  const copy = async (text) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setSnack("Link copied");
-    } catch {
-      setSnack("Copy failed");
-    }
-  };
-
   const stdFiltered = items.filter((r) => {
     if (filter === "bound") return isItemBound(r);
     if (filter === "issued") return !isItemBound(r);
@@ -324,18 +296,13 @@ function QrPreviewDialog({ open, onClose, printRunId }) {
   }) => {
     const hasToken = !!token;
     const url = hasToken ? buildUrl(token, channel) : null;
-       // Prefer server-rendered PNG (includes covert watermark). Fallback to client QR if it fails.
-    // const serverPng = hasToken ? `${getVerifyBase()}/qr/${encodeURIComponent(token)}.png${channel ? `?ch=${encodeURIComponent(channel)}` : ""}` : null;
-    
-// const size = 160; // small, crisp preview
-const size = 148; // match <img> width/height below
- const qs = new URLSearchParams();
- if (channel) qs.set("ch", channel);
- qs.set("w", String(size));  // ask backend for a small PNG
- const serverPng = hasToken ? `${getVerifyBase()}/qr/${encodeURIComponent(token)}.png?${qs.toString()}` : null;
+    const size = 148;
+    const qs = new URLSearchParams();
+    if (channel) qs.set("ch", channel);
+    qs.set("w", String(size));
+    const serverPng = hasToken ? `${getVerifyBase()}/qr/${encodeURIComponent(token)}.png?${qs.toString()}` : null;
 
     const shortPath = hasToken ? url.replace(getVerifyBase(), "") : "";
-
     const isParent = composite && role === "parent";
     const showRoleChip = composite;
     const showAssemblyLine = composite;
@@ -383,12 +350,9 @@ const size = 148; // match <img> width/height below
         <div style={{ position: "relative", display: "inline-block" }}>
           {hasToken ? (
             <>
-              {/* <QRCode value={url} size={148} /> */}
-             {serverPng ? (
+              {serverPng ? (
                 <img
                   src={serverPng}
-                  // width={148}
-                  // height={148}
                   width={size}
                   height={size}
                   alt="QR"
@@ -396,7 +360,6 @@ const size = 148; // match <img> width/height below
                   decoding="async"
                   fetchpriority="low"
                   onError={(e) => {
-                    // graceful fallback to client-side QR
                     e.currentTarget.style.display = "none";
                     const fallback = e.currentTarget.parentElement.querySelector(".__qr_fallback");
                     if (fallback) fallback.style.display = "block";
@@ -407,7 +370,6 @@ const size = 148; // match <img> width/height below
                 <QRCode value={url} size={148} />
               </div>
 
-              {/* Micro-QR overlay (HC string) */}
               {human && role === "parent" && (
                 <div style={{ position: "absolute", right: 4, bottom: 4, background: "#fff", padding: 2, borderRadius: 4 }}>
                   <QRCode value={human} size={44} />
@@ -536,7 +498,6 @@ const size = 148; // match <img> width/height below
                   sku={root.sku}
                   batch={root.batch}
                   seq={root.seq_in_run}
-                  // human={root.human_code}
                   human={pickHumanCode(root)}
                   deviceUid={root.device_uid}
                   role="parent"
@@ -571,14 +532,13 @@ const size = 148; // match <img> width/height below
                             sku={ch.sku}
                             batch={null}
                             seq={null}
-                            // human={null}
                             human={pickHumanCode(ch)}
                             deviceUid={ch.device_uid}
                             role="part"
                             compCount={0}
                             compReq={0}
                             parentUid={root.device_uid}
-                            isBound={!!token || isItemBound(ch)}
+                            isBound={!!token}
                             composite
                           />
                         );
@@ -618,45 +578,7 @@ const size = 148; // match <img> width/height below
             <Tab value="composite" label="Composite" />
           </Tabs>
 
-          {effectiveType === "composite" && (
-            <FormControlLabel
-              control={<Switch checked={grouped} onChange={(e) => setGrouped(e.target.checked)} />}
-              label={grouped ? "Grouped by root" : "Flat list"}
-              sx={{ ml: 2 }}
-            />
-          )}
         </MDBox>
-
-        {(effectiveType !== "composite" || !grouped) && (
-          <MDBox mt={1} mb={1} sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
-            {(effectiveType === "standard"
-              ? [
-                  ["all", "All", "info"],
-                  ["bound", "Bound", "success"],
-                  ["issued", "Issued", "error"],
-                ]
-              : [
-                  ["all", "All", "info"],
-                  ["bound", "Bound", "success"],
-                  ["issued", "Issued", "error"],
-                  ["parents", "Roots", "info"],
-                  ["parts", "Parts", "info"],
-                  ["bom_missing", "BOM Missing", "warning"],
-                  ["unassigned_parts", "Unassigned Parts", "error"],
-                ]
-            ).map(([key, label, color]) => (
-              <MDButton
-                key={key}
-                size="small"
-                variant={filter === key ? "gradient" : "outlined"}
-                color={color}
-                onClick={() => setFilter(key)}
-              >
-                {label}
-              </MDButton>
-            ))}
-          </MDBox>
-        )}
 
         {effectiveType === "composite" && grouped ? (
           <GroupedComposite />
@@ -673,14 +595,13 @@ const size = 148; // match <img> width/height below
                 sku={r.sku}
                 batch={r.batch}
                 seq={r.seq_in_run}
-                // human={r.human_code}
                 human={pickHumanCode(r)}
                 deviceUid={r.device_uid}
                 role={r.role}
                 compCount={r.comp_count || 0}
                 compReq={r.comp_required || 0}
                 parentUid={r.parent_device_uid}
-                isBound={isItemBound(r)}
+                isBound={r.status === "bound" || !!r.device_uid}
                 composite={effectiveType === "composite"}
               />
             ))}
@@ -758,6 +679,22 @@ function BatchesDialog({ open, onClose, product }) {
     }
   }
 
+  async function downloadBatchCSV(b, product) {
+    const pidOrSku = product?.sku || product?.id;
+    if (!pidOrSku || !b?.batch_code) throw new Error("Missing product or batch");
+    const url = `/products/${encodeURIComponent(pidOrSku)}/batches/${encodeURIComponent(b.batch_code)}/bind-template`;
+    const res = await client.get(url, { responseType: "blob" });
+    const blob = new Blob([res.data], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    const fname = `${(product?.sku || product?.id)}_bind_template_${b.batch_code}.csv`;
+    a.download = fname;
+    document.body.appendChild(a);
+    a.click();
+    URL.revokeObjectURL(a.href);
+    a.remove();
+  }
+
   return (
     <>
       <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
@@ -778,24 +715,28 @@ function BatchesDialog({ open, onClose, product }) {
               <thead>
                 <tr style={{ background: "rgba(0,0,0,.02)" }}>
                   <th style={{ padding: 10, textAlign: "left" }}>Batch Code</th>
-                  <th style={{ padding: 10, textAlign: "right" }}>Runs</th>
-                  <th style={{ padding: 10, textAlign: "right" }}>Planned Qty</th>
+                  <th style={{ padding: 10, textAlign: "left" }}>Mfg Date</th>
+                  <th style={{ padding: 10, textAlign: "left" }}>Exp Date</th>
                   <th style={{ padding: 10, textAlign: "right" }}>Issued Codes</th>
-                  <th style={{ padding: 10, textAlign: "left" }}>Last Run</th>
                   <th style={{ padding: 10, textAlign: "center" }}>Actions</th>
+                  <th style={{ padding: 10, textAlign: "center" }}>Download</th>
                 </tr>
               </thead>
               <tbody>
                 {batches.map((b) => (
                   <tr key={b.batch_id} style={{ borderTop: "1px solid rgba(0,0,0,.05)" }}>
                     <td style={{ padding: 10 }}>{b.batch_code}</td>
-                    <td style={{ padding: 10, textAlign: "right" }}>{b.runs_count}</td>
-                    <td style={{ padding: 10, textAlign: "right" }}>{b.planned_qty}</td>
+                    <td style={{ padding: 10 }}>{b.mfg_date || "—"}</td>
+                    <td style={{ padding: 10 }}>{b.exp_date || "—"}</td>
                     <td style={{ padding: 10, textAlign: "right" }}>{b.issued_codes}</td>
-                    <td style={{ padding: 10 }}>{b.last_run_at || "—"}</td>
                     <td style={{ padding: 10, textAlign: "center" }}>
                       <MDButton size="small" variant="outlined" color="info" onClick={() => viewRuns(b)}>
                         View Runs
+                      </MDButton>
+                    </td>
+                    <td style={{ padding: 10, textAlign: "center" }}>
+                      <MDButton size="small" variant="outlined" color="info" onClick={() => downloadBatchCSV(b, product)}>
+                        Template CSV
                       </MDButton>
                     </td>
                   </tr>
@@ -880,7 +821,6 @@ function BatchesDialog({ open, onClose, product }) {
         </DialogActions>
       </Dialog>
 
-      {/* Reuse the QR preview for a run */}
       <QrPreviewDialog
         open={!!previewRunId}
         onClose={() => setPreviewRunId(null)}
@@ -891,7 +831,7 @@ function BatchesDialog({ open, onClose, product }) {
 }
 
 /* =========================
-   Per-product mint dialog
+   Per-product mint dialog (WITH tenant settings)
    ========================= */
 function MintDialog({ open, onClose, product }) {
   const [qty, setQty] = useState(100);
@@ -903,14 +843,63 @@ function MintDialog({ open, onClose, product }) {
   const [err, setErr] = useState("");
   const [result, setResult] = useState(null);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [mfgDate, setMfgDate] = useState("");   // yyyy-mm-dd
+  const [expDate, setExpDate] = useState("");   // yyyy-mm-dd
 
+  // verification mode + optional overrides
+  const [verificationMode, setVerificationMode] = useState("qr"); // qr | qr_nfc | qr_puf | qr_puf_nfc | puf_nfc
+  const [nfcKeyRef, setNfcKeyRef] = useState("");      // optional override
+  const [pufAlg, setPufAlg] = useState("");            // optional override
+  const [pufThreshold, setPufThreshold] = useState(""); // optional override
+
+  // Tenant defaults (to show helperText + prefill)
+  const [tenantDefaults, setTenantDefaults] = useState({
+    defaultMode: "qr",
+    nfcKeyRef: "",
+    pufAlg: "",
+    pufThreshold: "",
+  });
+
+  // Load defaults when dialog opens
   useEffect(() => {
+    let mounted = true;
+    async function loadDefaults() {
+      try {
+        const s = await getTenantSettings();
+        const defMode = s["verification.default_mode"]?.mode || "qr";
+        const nfcRef  = s["nfc.key.current"]?.key_ref || s["nfc.key.current_ref"] || "";
+        const pAlg    = s["puf.alg"] || s["puf.policy"]?.alg || "";
+        const pThrVal = (s["puf.threshold"] ?? s["puf.policy"]?.threshold ?? "");
+
+        if (!mounted) return;
+
+        setTenantDefaults({
+          defaultMode: defMode,
+          nfcKeyRef: nfcRef,
+          pufAlg: pAlg,
+          pufThreshold: (pThrVal === null || pThrVal === undefined) ? "" : String(pThrVal),
+        });
+
+        // prefill UI
+        setVerificationMode(defMode);
+        setNfcKeyRef(nfcRef || "");
+        setPufAlg(pAlg || "");
+        setPufThreshold(pThrVal !== "" && pThrVal !== null && pThrVal !== undefined ? String(pThrVal) : "");
+      } catch {
+        // safe defaults
+        setTenantDefaults({ defaultMode: "qr", nfcKeyRef: "", pufAlg: "", pufThreshold: "" });
+        setVerificationMode("qr");
+      }
+    }
+
     if (open) {
       setErr("");
       setResult(null);
       setLoading(false);
       setPreviewOpen(false);
+      loadDefaults();
     }
+    return () => { mounted = false; };
   }, [open]);
 
   async function onMint() {
@@ -924,6 +913,21 @@ function MintDialog({ open, onClose, product }) {
         micro_mode: microMode,
         create_print_run: true,
         print_vendor: vendor.trim() || undefined,
+
+        // required by backend
+        verification_mode: verificationMode,
+
+        // batch-level adds
+        ...(mfgDate ? { batch_mfg_date: mfgDate } : {}),
+        ...(expDate ? { batch_exp_date: expDate } : {}),
+
+        // OPTION: if you also want every QR to inherit exp date by default
+        ...(expDate ? { expires_at: expDate } : {}),
+
+        // optional overrides (omit when blank => backend uses tenant defaults)
+        ...(nfcKeyRef.trim() ? { nfc_key_ref: nfcKeyRef.trim() } : {}),
+        ...(pufAlg.trim() ? { puf_alg: pufAlg.trim() } : {}),
+        ...(pufThreshold !== "" ? { puf_score_threshold: Number(pufThreshold) } : {}),
       };
       const data = await mintProductCodes(product?.sku || product?.id, payload);
       setResult(data);
@@ -933,6 +937,7 @@ function MintDialog({ open, onClose, product }) {
       setLoading(false);
     }
   }
+
   const isComposite = (product?.type || "").toLowerCase() === "composite";
 
   return (
@@ -956,11 +961,85 @@ function MintDialog({ open, onClose, product }) {
           />
           <MDInput label="Channel Code" value={channel} onChange={(e) => setChannel(e.target.value)} required />
           <MDInput label="Batch Code (optional)" value={batch} onChange={(e) => setBatch(e.target.value)} />
-          <MDInput select label="Micro Signal" value={microMode} onChange={(e) => setMicroMode(e.target.value)}>
+
+          <MDInput
+            type="date"
+            label="Mfg Date (optional)"
+            value={mfgDate}
+            onChange={(e) => setMfgDate(e.target.value)}
+          />
+
+          <MDInput
+            type="date"
+            label="Exp Date (optional)"
+            value={expDate}
+            onChange={(e) => setExpDate(e.target.value)}
+            helperText="If set, batch gets this Exp Date and each QR defaults to it"
+          />
+
+          {/* Verification mode select */}
+          <MDSelect
+            label="Verification Mode"
+            value={verificationMode}
+            onChange={(e) => setVerificationMode(e.target.value)}
+            helperText="Choose how these codes will be verified"
+          >
+            <MenuItem value="qr">QR (basic)</MenuItem>
+            <MenuItem value="qr_nfc">QR + NFC</MenuItem>
+            <MenuItem value="qr_puf">QR + PUF</MenuItem>
+            <MenuItem value="qr_puf_nfc">QR + PUF + NFC</MenuItem>
+          </MDSelect>
+
+          {/* Micro signal */}
+          <MDSelect label="Micro Signal" value={microMode} onChange={(e) => setMicroMode(e.target.value)}>
             <MenuItem value="hmac16">HMAC16 (recommended)</MenuItem>
             <MenuItem value="none">None</MenuItem>
-          </MDInput>
+          </MDSelect>
+
           <MDInput label="Print Vendor (optional)" value={vendor} onChange={(e) => setVendor(e.target.value)} />
+        </MDBox>
+
+        {/* Conditional overrides */}
+        <MDBox mt={2} display="grid" gridTemplateColumns={{ xs: "1fr", md: "1fr 1fr" }} gap={2}>
+          {["qr_nfc","qr_puf_nfc","puf_nfc"].includes(verificationMode) && (
+            <MDInput
+              label="NFC key ref (optional override)"
+              value={nfcKeyRef}
+              onChange={(e) => setNfcKeyRef(e.target.value)}
+              helperText={
+                tenantDefaults.nfcKeyRef
+                  ? `Blank = use tenant default: ${tenantDefaults.nfcKeyRef}`
+                  : "If blank, backend will use tenant default"
+              }
+            />
+          )}
+
+          {["qr_puf","qr_puf_nfc","puf_nfc"].includes(verificationMode) && (
+            <>
+              <MDInput
+                label="PUF algorithm (optional)"
+                value={pufAlg}
+                onChange={(e) => setPufAlg(e.target.value)}
+                helperText={
+                  tenantDefaults.pufAlg
+                    ? `Blank = use tenant default: ${tenantDefaults.pufAlg}`
+                    : "e.g., ORBv1"
+                }
+              />
+              <MDInput
+                type="number"
+                label="PUF threshold (0–100, optional)"
+                value={pufThreshold}
+                onChange={(e) => setPufThreshold(e.target.value)}
+                inputProps={{ min: 0, max: 100, step: 0.1 }}
+                helperText={
+                  tenantDefaults.pufThreshold
+                    ? `Blank = use tenant default: ${tenantDefaults.pufThreshold}`
+                    : "e.g., 85"
+                }
+              />
+            </>
+          )}
         </MDBox>
 
         {loading && (
@@ -1010,28 +1089,28 @@ function MintDialog({ open, onClose, product }) {
 function BindDevicesPanel({ products, labelStatsMap }) {
   const [sku, setSku] = useState("");
   const [batchCode, setBatchCode] = useState("");
-  const [allocate, setAllocate] = useState(true); // if false → use provided 'token' column
-  const [rows, setRows] = useState([]); // parsed devices
+  const [allocate, setAllocate] = useState(true);
+  const [rows, setRows] = useState([]);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const fileRef = useRef(null);
 
-  // NEW: cache per-SKU label stats fetched on-demand (for SKUs present in the uploaded file)
-  const [extraStats, setExtraStats] = useState({}); // { [sku]: {available,...} }
+  const [extraStats, setExtraStats] = useState({});
+  const [batches, setBatches] = useState([]);           // batches for selected product
+  const [batchesLoading, setBatchesLoading] = useState(false);
+  const [batchAvail, setBatchAvail] = useState(null);   // available labels for selected batch (if API provided)
 
   const productOptions = useMemo(
     () => (products || []).map((p) => ({ sku: p.sku, name: p.name })),
     [products]
   );
 
-  // bindable rows are those with their own device_uid
   const bindableRows = useMemo(() => rows.filter((r) => !!r.device_uid), [rows]);
 
-  // availability per selected SKU (for the caption)
+  // Compute availability (SKU level)
   const availableForSku = sku ? (labelStatsMap[sku]?.available ?? 0) : 0;
 
-  // count uploaded rows per SKU (one-file composite or legacy single-SKU)
   const hasSkuInRows = rows.some((r) => !!r.sku);
   const countsBySku = useMemo(() => {
     const m = {};
@@ -1043,7 +1122,7 @@ function BindDevicesPanel({ products, labelStatsMap }) {
         m[s] = (m[s] || 0) + 1;
       });
     } else if (sku) {
-      m[sku] = rows.length; // legacy single-SKU file
+      m[sku] = rows.length;
     }
     return m;
   }, [rows, hasSkuInRows, sku]);
@@ -1051,7 +1130,6 @@ function BindDevicesPanel({ products, labelStatsMap }) {
   const getAvailFor = (s) =>
     (labelStatsMap[s]?.available ?? (extraStats[s]?.available ?? 0));
 
-  // Shortage across all SKUs in the file
   const shortage = useMemo(() => {
     if (!allocate) return 0;
     let short = 0;
@@ -1062,7 +1140,7 @@ function BindDevicesPanel({ products, labelStatsMap }) {
     return short;
   }, [allocate, countsBySku, extraStats, labelStatsMap]);
 
-  // Fetch missing per-SKU label stats for SKUs we see in the file
+  // Pull in extra SKU stats as needed
   useEffect(() => {
     const needed = Object.keys(countsBySku)
       .filter((s) => s && labelStatsMap[s] == null && extraStats[s] == null);
@@ -1084,69 +1162,86 @@ function BindDevicesPanel({ products, labelStatsMap }) {
     return () => { cancelled = true; };
   }, [countsBySku, labelStatsMap, extraStats]);
 
-  function downloadTemplate() {
-    // Add 'sku' column so one-file composite binding just works
-    const data = [
-      ["sku", "device_uid", "serial", "imei", "mac", "mfg_date", "token", "parent_device_uid"],
-      ["BK-01", "BIKE-0001", "SER-ROOT-001", "", "", "2025-09-24", "", ""],
-      ["EN-01", "ENGINE-0001", "SER-EN-001", "", "", "2025-09-24", "", "BIKE-0001"],
-    ];
-    const ws = XLSX.utils.aoa_to_sheet(data);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "BindTemplate");
-    XLSX.writeFile(wb, "device_bind_template.xlsx");
+  // Load batches when product (sku) changes
+  useEffect(() => {
+    let cancel = false;
+    async function loadBatches() {
+      setBatches([]);
+      setBatchCode("");
+      setBatchAvail(null);
+      if (!sku) return;
+      setBatchesLoading(true);
+      try {
+        const data = await getBatchesByProduct(sku);
+        if (!cancel) setBatches(data.items || []);
+      } catch {
+        if (!cancel) setBatches([]);
+      } finally {
+        if (!cancel) setBatchesLoading(false);
+      }
+    }
+    loadBatches();
+    return () => { cancel = true; };
+  }, [sku]);
+
+  // Fetch availability for a specific batch (if backend route exists)
+  async function fetchBatchAvailability(skuArg, batch) {
+    try {
+      // Prefer dedicated endpoint if you implemented it:
+      // GET /products/{idOrSku}/batches/{batchCode}/label-stats
+      const url = `/products/${encodeURIComponent(skuArg)}/batches/${encodeURIComponent(batch)}/label-stats`;
+      const { data } = await client.get(url);
+      // Expect { available, bound, total } like the SKU stats
+      if (data && typeof data.available !== "undefined") return data;
+    } catch {
+      // silently fall back
+    }
+    return null;
   }
 
-//   function parseWorkbook(wb) {
-//     const ws = wb.Sheets[wb.SheetNames[0]];
-//     const json = XLSX.utils.sheet_to_json(ws, { defval: "" });
-//     const norm = json.map((r) => {
-//       const low = {};
-//       for (const k of Object.keys(r)) low[String(k).trim().toLowerCase()] = r[k];
-//       const uid = String(low.device_uid || low.uid || low.serial || "").trim();
-//       const token = String(low.token || "").trim() || undefined;
-//       const parent = String(low.parent_device_uid || low.parent || "").trim();
-//       const sku = String(low.sku || low.product || low.product_sku || "").trim();
-//       const attrs = {};
-//       for (const [k, v] of Object.entries(low)) {
-//         if (["sku","product","product_sku","device_uid","uid","serial","token","parent_device_uid","parent"].includes(k)) continue;
-//         attrs[k] = v;
-//       }
-//       return { sku: sku || undefined, device_uid: uid, token, attrs, parent_device_uid: parent || undefined };
-//     });
-//     return norm;
-//   }
-
- function parseWorkbook(wb) {
-  const ws = wb.Sheets[wb.SheetNames[0]];
-  const json = XLSX.utils.sheet_to_json(ws, { defval: "" });
-
-  const norm = json.map((r) => {
-    const low = {};
-    for (const k of Object.keys(r)) low[String(k).trim().toLowerCase()] = r[k];
-
-    const uid    = String(low.device_uid || low.uid || low.serial || "").trim();
-    const token  = String(low.token || "").trim() || undefined;
-    const parent = String(low.parent_device_uid || low.parent || "").trim();
-    const sku    = String(low.sku || low.product || low.product_sku || "").trim();
-
-    const attrs = {};
-    for (const [k, v] of Object.entries(low)) {
-      if (["sku","product","product_sku","device_uid","uid","serial","token","parent_device_uid","parent"].includes(k)) continue;
-      attrs[k] = v;
+  // When a batch is chosen, try to show its availability
+  useEffect(() => {
+    let cancel = false;
+    async function run() {
+      setBatchAvail(null);
+      if (!sku || !batchCode) return;
+      const info = await fetchBatchAvailability(sku, batchCode);
+      if (!cancel) setBatchAvail(info);
     }
+    run();
+    return () => { cancel = true; };
+  }, [sku, batchCode]);
 
-    return {
-      sku: sku || undefined,
-      device_uid: uid,
-      parent_device_uid: parent || undefined,
-      token,
-      attrs,
-    };
-  });
+  function parseWorkbook(wb) {
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const json = XLSX.utils.sheet_to_json(ws, { defval: "" });
 
-  return norm;
-}
+    const norm = json.map((r) => {
+      const low = {};
+      for (const k of Object.keys(r)) low[String(k).trim().toLowerCase()] = r[k];
+
+      const uid    = String(low.device_uid || low.uid || low.serial || "").trim();
+      const token  = String(low.token || "").trim() || undefined;
+      const parent = String(low.parent_device_uid || low.parent || "").trim();
+      const sku    = String(low.sku || low.product || low.product_sku || "").trim();
+
+      const attrs = {};
+      for (const [k, v] of Object.entries(low)) {
+        if (["sku","product","product_sku","device_uid","uid","serial","token","parent_device_uid","parent"].includes(k)) continue;
+        attrs[k] = v;
+      }
+
+      return {
+        sku: sku || undefined,
+        device_uid: uid,
+        parent_device_uid: parent || undefined,
+        token,
+        attrs,
+      };
+    });
+
+    return norm;
+  }
   async function onFile(e) {
     setErr("");
     setRows([]);
@@ -1184,7 +1279,6 @@ function BindDevicesPanel({ products, labelStatsMap }) {
       }
     }
     if (allocate && shortage > 0) {
-      // Build a per-SKU breakdown to help the operator mint the right SKUs
       const parts = Object.entries(countsBySku).map(([s, cnt]) => {
         const avail = getAvailFor(s) || 0;
         const need = Math.max(0, cnt - avail);
@@ -1198,34 +1292,20 @@ function BindDevicesPanel({ products, labelStatsMap }) {
 
     setBusy(true);
     try {
-      // Send one-file composite payload: sku + parent_device_uid per row
-    //   const payload = {
-    //     allocate,
-    //     batch_code: batchCode || undefined,
-    //     devices: rows.map((r) => ({
-    //       sku: r.sku || undefined,
-    //       device_uid: (r.device_uid || r.parent_device_uid),
-    //       parent_device_uid: r.parent_device_uid || undefined,
-    //       token: r.token,
-    //       attrs: r.attrs,
-    //     })),
-    //   };
-
-    const payload = {
-  allocate,
-  batch_code: batchCode || undefined,
-  devices: rows.map((r) => ({
-    sku: r.sku || undefined,                       // <-- IMPORTANT
-    device_uid: (r.device_uid || r.parent_device_uid),
-    parent_device_uid: r.parent_device_uid || undefined,
-    token: r.token,
-    attrs: r.attrs,
-  })),
-};
+      const payload = {
+        allocate,
+        batch_code: batchCode || undefined,
+        devices: rows.map((r) => ({
+          sku: r.sku || undefined,
+          device_uid: (r.device_uid || r.parent_device_uid),
+          parent_device_uid: r.parent_device_uid || undefined,
+          token: r.token,
+          attrs: r.attrs,
+        })),
+      };
 
       const data = await bulkBindDevices(sku, payload);
 
-      // Interlink parent↔children if parent_device_uid provided (idempotent backend)
       const parentMap = new Map();
       for (const r of rows) {
         if (r.parent_device_uid && r.device_uid) {
@@ -1246,6 +1326,20 @@ function BindDevicesPanel({ products, labelStatsMap }) {
     }
   }
 
+  // Helper to print a nice label for batch options
+  function batchLabel(b) {
+    const parts = [b.batch_code];
+    const m = b.mfg_date ? `mfg:${b.mfg_date}` : null;
+    const x = b.exp_date ? `exp:${b.exp_date}` : null;
+    if (m || x) parts.push([m, x].filter(Boolean).join(" / "));
+    if (typeof b.issued_codes !== "undefined") parts.push(`issued:${b.issued_codes}`);
+    return parts.join(" • ");
+  }
+
+  const effectiveAvailable = batchAvail && typeof batchAvail.available === "number"
+    ? batchAvail.available
+    : availableForSku;
+
   return (
     <MDBox p={3}>
       {err && (
@@ -1255,18 +1349,27 @@ function BindDevicesPanel({ products, labelStatsMap }) {
       )}
 
       <MDBox display="grid" gridTemplateColumns={{ xs: "1fr", md: "1fr 1fr 1fr" }} gap={2} mb={1.5}>
-        <MDInput select label="Product (SKU)" value={sku} onChange={(e) => setSku(e.target.value)}>
+        <MDSelect label="Product (SKU)" value={sku} onChange={(e) => setSku(e.target.value)}>
           {productOptions.map((p) => (
             <MenuItem key={p.sku} value={p.sku}>
               {p.sku} — {p.name}
             </MenuItem>
           ))}
-        </MDInput>
-        <MDInput
-          label="Batch Code (optional, restrict allocation)"
+        </MDSelect>
+
+        <MDSelect
+          label={batchesLoading ? "Batch (loading…)" : "Batch (optional)"}
           value={batchCode}
           onChange={(e) => setBatchCode(e.target.value)}
-        />
+          disabled={!sku || batchesLoading || batches.length === 0}
+        >
+          {batches.map((b) => (
+            <MenuItem key={b.batch_id} value={b.batch_code}>
+              {batchLabel(b)}
+            </MenuItem>
+          ))}
+        </MDSelect>
+
         <FormControlLabel
           sx={{ ml: 1 }}
           control={<Switch checked={allocate} onChange={(e) => setAllocate(e.target.checked)} />}
@@ -1275,8 +1378,10 @@ function BindDevicesPanel({ products, labelStatsMap }) {
       </MDBox>
 
       {sku && (
-        <MDTypography variant="caption" color={availableForSku > 0 ? "text" : "error"}>
-          Available labels for <b>{sku}</b>: <b>{availableForSku}</b>
+        <MDTypography variant="caption" color={effectiveAvailable > 0 ? "text" : "error"}>
+          {batchCode
+            ? <>Available labels for <b>{sku}</b> in batch <b>{batchCode}</b>: <b>{effectiveAvailable}</b></>
+            : <>Available labels for <b>{sku}</b>: <b>{effectiveAvailable}</b></>}
         </MDTypography>
       )}
 
@@ -1285,9 +1390,7 @@ function BindDevicesPanel({ products, labelStatsMap }) {
         <MDButton variant="outlined" color="info" onClick={() => fileRef.current?.click()}>
           <Icon sx={{ mr: 0.5 }}>upload</Icon> Upload Devices (CSV/XLSX)
         </MDButton>
-        <MDButton variant="text" color="info" onClick={downloadTemplate}>
-          <Icon sx={{ mr: 0.5 }}>download</Icon> Download Template
-        </MDButton>
+        {/* Template download intentionally removed from this section as requested */}
       </MDBox>
 
       {rows.length > 0 && (
@@ -1377,7 +1480,7 @@ function BindDevicesPanel({ products, labelStatsMap }) {
 export default function GenerateQrPage() {
   const [tab, setTab] = useState(0);
   const [products, setProducts] = useState([]);
-  const [labelStats, setLabelStats] = useState({}); // { [sku]: {available, bound, voided, total} }
+  const [labelStats, setLabelStats] = useState({});
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [selected, setSelected] = useState(null);
@@ -1387,13 +1490,12 @@ export default function GenerateQrPage() {
   const query = useQuery();
   useEffect(() => {
     const t = query.get("tab") || ""; if (t === "bind") setTab(1);
-  }, []); // run once on mount
+  }, []);
 
   async function refresh() {
     setLoading(true);
     setErr("");
     try {
-      // Keep root_only=1 so By Product shows roots; Bind panel fetches per-SKU stats on demand
       const data = await listProducts({ root_only: 1 });
       const items = Array.isArray(data) ? data : data?.items || [];
       setProducts(items);
@@ -1504,7 +1606,6 @@ export default function GenerateQrPage() {
                 </Tabs>
               </MDBox>
 
-              {/* By Product */}
               {tab === 0 && (
                 <MDBox p={3}>
                   {err && (
@@ -1522,14 +1623,12 @@ export default function GenerateQrPage() {
                 </MDBox>
               )}
 
-              {/* Bind Devices */}
               {tab === 1 && <BindDevicesPanel products={products} labelStatsMap={labelStats} />}
             </Card>
           </Grid>
         </Grid>
       </MDBox>
 
-      {/* dialogs */}
       <MintDialog open={!!selected} onClose={() => setSelected(null)} product={selected} />
       <BatchesDialog open={!!batchesFor} onClose={() => setBatchesFor(null)} product={batchesFor} />
     </DashboardLayout>
