@@ -1,3 +1,4 @@
+// src/pages/products/index.js
 import { useEffect, useMemo, useState } from "react";
 import { v4 as uuid } from "uuid";
 
@@ -16,6 +17,7 @@ import { styled } from "@mui/material/styles";
 import MDBox from "components/MDBox";
 import MDTypography from "components/MDTypography";
 import MDInput from "components/MDInput";
+import MDSelect from "components/MDSelect";
 import MDButton from "components/MDButton";
 import MDBadge from "components/MDBadge";
 
@@ -33,12 +35,14 @@ function useQuery() {
   const { search } = window.location;
   return new URLSearchParams(search);
 }
+
 const NodeBox = styled("div")(({ theme }) => ({
   borderRadius: 12,
   border: "1px solid rgba(0,0,0,0.08)",
   padding: theme.spacing(1),
   marginBottom: theme.spacing(1),
 }));
+
 function NodeRow({ node, isRoot, onChange, onAddChild, onRemove }) {
   return (
     <NodeBox>
@@ -85,6 +89,7 @@ function NodeRow({ node, isRoot, onChange, onAddChild, onRemove }) {
     </NodeBox>
   );
 }
+
 function renderTree({ node, isRoot, onChange, onAddChild, onRemove }) {
   return (
     <MDBox key={node.id} ml={isRoot ? 0 : 3}>
@@ -131,7 +136,7 @@ export default function ProductsPage() {
     setLoading(true);
     setErr("");
     try {
-    //   const data = await listProducts();
+      // const data = await listProducts();
       const data = await listProducts({ root_only: 1 });
       setRowsRaw(Array.isArray(data) ? data : data?.items || []);
     } catch (e) {
@@ -140,7 +145,9 @@ export default function ProductsPage() {
       setLoading(false);
     }
   }
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    refresh();
+  }, []);
 
   // Pre-fill builder root via ?root=SKU
   useEffect(() => {
@@ -158,9 +165,15 @@ export default function ProductsPage() {
   }, [type]);
 
   // Catalog helpers
-  function addCompRow() { setComponents((p) => [...p, { sku: "", quantity: 1 }]); }
-  function removeCompRow(idx) { setComponents((p) => (p.length > 1 ? p.filter((_, i) => i !== idx) : p)); }
-  function changeComp(idx, key, val) { setComponents((p) => p.map((row, i) => (i === idx ? { ...row, [key]: val } : row))); }
+  function addCompRow() {
+    setComponents((p) => [...p, { sku: "", quantity: 1 }]);
+  }
+  function removeCompRow(idx) {
+    setComponents((p) => (p.length > 1 ? p.filter((_, i) => i !== idx) : p));
+  }
+  function changeComp(idx, key, val) {
+    setComponents((p) => p.map((row, i) => (i === idx ? { ...row, [key]: val } : row)));
+  }
 
   // Catalog create
   async function onCreate(e) {
@@ -184,7 +197,10 @@ export default function ProductsPage() {
       }
 
       await createProduct(payload);
-      setSku(""); setName(""); setType("standard"); setComponents([{ sku: "", quantity: 1 }]);
+      setSku("");
+      setName("");
+      setType("standard");
+      setComponents([{ sku: "", quantity: 1 }]);
       refresh();
     } catch (e) {
       setErr(e?.response?.data?.message || e.message || "Failed to create product.");
@@ -223,12 +239,18 @@ export default function ProductsPage() {
 
   // Builder mutators
   function updateNode(updated) {
-    function walk(n) { if (n.id === updated.id) return { ...updated }; return { ...n, children: (n.children || []).map(walk) }; }
+    function walk(n) {
+      if (n.id === updated.id) return { ...updated };
+      return { ...n, children: (n.children || []).map(walk) };
+    }
     setRoot((r) => walk(r));
   }
   function addChild(parentId) {
     const child = { id: uuid(), sku: "", name: "", quantity: 1, children: [] };
-    function walk(n) { if (n.id === parentId) return { ...n, children: [...(n.children || []), child] }; return { ...n, children: (n.children || []).map(walk) }; }
+    function walk(n) {
+      if (n.id === parentId) return { ...n, children: [...(n.children || []), child] };
+      return { ...n, children: (n.children || []).map(walk) };
+    }
     setRoot((r) => walk(r));
   }
   function removeNode(nodeId) {
@@ -255,7 +277,10 @@ export default function ProductsPage() {
   }
   function collectAllNodes(node) {
     const arr = [];
-    function dfs(n) { arr.push(n); (n.children || []).forEach(dfs); }
+    function dfs(n) {
+      arr.push(n);
+      (n.children || []).forEach(dfs);
+    }
     dfs(node);
     return arr;
   }
@@ -266,11 +291,17 @@ export default function ProductsPage() {
     if (!canWrite) return;
 
     const rootSku = (root.sku || "").trim();
-    if (!rootSku) { setBuilderErr("Root SKU is required."); return; }
+    if (!rootSku) {
+      setBuilderErr("Root SKU is required.");
+      return;
+    }
 
     function validate(n) {
       for (const c of n.children || []) {
-        if (!(c.sku || "").trim()) { setBuilderErr("Every component row must have a SKU."); return false; }
+        if (!(c.sku || "").trim()) {
+          setBuilderErr("Every component row must have a SKU.");
+          return false;
+        }
         if (!validate(c)) return false;
       }
       return true;
@@ -346,38 +377,49 @@ export default function ProductsPage() {
     const rows = rowsRaw.map((p) => {
       const statusStr = p.status || "active";
       const typeStr = p.type || "standard";
-      const compCount = p.components_count ?? p.componentsCount ?? (Array.isArray(p.components) ? p.components.length : undefined);
+      const compCount =
+        p.components_count ?? p.componentsCount ?? (Array.isArray(p.components) ? p.components.length : undefined);
 
       return {
         sku: <MDTypography variant="button" fontWeight="medium">{p.sku}</MDTypography>,
         name: <MDTypography variant="button" fontWeight="regular">{p.name}</MDTypography>,
         type: canWrite ? (
-          <MDInput
+          <MDSelect
             select
             value={typeStr}
             onChange={(e) => onChangeType(p.id, e.target.value)}
             size="small"
-            sx={{ minWidth: 160, "& .MuiInputBase-input": { py: 1 } }}
+            sx={{ minWidth: 160 }}
           >
             <MenuItem value="standard">Standard</MenuItem>
             <MenuItem value="composite">Composite</MenuItem>
-          </MDInput>
+          </MDSelect>
         ) : (
-          <MDBadge badgeContent={typeStr} color={typeStr === "composite" ? "info" : "secondary"} variant="gradient" size="sm" />
+          <MDBadge
+            badgeContent={typeStr}
+            color={typeStr === "composite" ? "info" : "secondary"}
+            variant="gradient"
+            size="sm"
+          />
         ),
         status: canWrite ? (
-          <MDInput
+          <MDSelect
             select
             value={statusStr}
             onChange={(e) => onToggleStatus(p.id, e.target.value)}
             size="small"
-            sx={{ minWidth: 140, "& .MuiInputBase-input": { py: 1 } }}
+            sx={{ minWidth: 140 }}
           >
             <MenuItem value="active">Active</MenuItem>
             <MenuItem value="archived">Archived</MenuItem>
-          </MDInput>
+          </MDSelect>
         ) : (
-          <MDBadge badgeContent={statusStr} color={statusStr === "active" ? "success" : "dark"} variant="gradient" size="sm" />
+          <MDBadge
+            badgeContent={statusStr}
+            color={statusStr === "active" ? "success" : "dark"}
+            variant="gradient"
+            size="sm"
+          />
         ),
         components: (
           <MDTypography variant="caption" color="text">
@@ -418,7 +460,9 @@ export default function ProductsPage() {
           <Grid item xs={12}>
             <Card>
               <MDBox p={2} display="flex" alignItems="center" justifyContent="space-between">
-                <MDTypography variant="h5" fontWeight="medium">Products</MDTypography>
+                <MDTypography variant="h5" fontWeight="medium">
+                  Products
+                </MDTypography>
                 <Tabs value={tab} onChange={(_, v) => setTab(v)}>
                   <Tab label="Catalog" />
                   <Tab label="Builder" />
@@ -428,7 +472,11 @@ export default function ProductsPage() {
               {/* CATALOG */}
               {tab === 0 && (
                 <MDBox p={3}>
-                  {err && <MDTypography color="error" variant="button" mb={2} display="block">{err}</MDTypography>}
+                  {err && (
+                    <MDTypography color="error" variant="button" mb={2} display="block">
+                      {err}
+                    </MDTypography>
+                  )}
 
                   <MDBox
                     component="form"
@@ -440,18 +488,25 @@ export default function ProductsPage() {
                     mb={2}
                   >
                     <MDInput label="SKU" value={sku} onChange={(e) => setSku(e.target.value)} required size="small" />
-                    <MDInput label="Product name" value={name} onChange={(e) => setName(e.target.value)} required size="small" />
                     <MDInput
+                      label="Product name"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      required
+                      size="small"
+                    />
+
+                    <MDSelect
                       select
                       label="Type"
                       value={type}
                       onChange={(e) => setType(e.target.value)}
                       size="small"
-                      sx={{ minWidth: 180, "& .MuiInputBase-input": { py: 1 } }}
+                      sx={{ minWidth: 180 }}
                     >
                       <MenuItem value="standard">Standard</MenuItem>
                       <MenuItem value="composite">Composite</MenuItem>
-                    </MDInput>
+                    </MDSelect>
 
                     <MDButton type="submit" variant="gradient" color="info" disabled={!canWrite}>
                       <Icon sx={{ mr: 0.5 }}>add</Icon>
@@ -465,7 +520,8 @@ export default function ProductsPage() {
                         Direct Components (SKU + Quantity)
                       </MDTypography>
                       {components.map((row, idx) => (
-                        <MDBox key={idx}
+                        <MDBox
+                          key={idx}
                           display="grid"
                           gridTemplateColumns={{ xs: "1fr", md: "1fr 150px auto" }}
                           gap={1}
@@ -499,12 +555,25 @@ export default function ProductsPage() {
                   )}
 
                   <MDBox mt={3}>
-                    <MDBox mx={0} mt={-1} py={2} px={2} variant="gradient" bgColor="info" borderRadius="lg" coloredShadow="info">
-                      <MDTypography variant="h6" color="white">Catalog ({rowsRaw.length})</MDTypography>
+                    <MDBox
+                      mx={0}
+                      mt={-1}
+                      py={2}
+                      px={2}
+                      variant="gradient"
+                      bgColor="info"
+                      borderRadius="lg"
+                      coloredShadow="info"
+                    >
+                      <MDTypography variant="h6" color="white">
+                        Catalog ({rowsRaw.length})
+                      </MDTypography>
                     </MDBox>
                     <MDBox pt={3} px={2} pb={2}>
                       {loading ? (
-                        <MDTypography variant="button" color="text">Loading…</MDTypography>
+                        <MDTypography variant="button" color="text">
+                          Loading…
+                        </MDTypography>
                       ) : (
                         <DataTable
                           table={dataTable}
@@ -522,13 +591,24 @@ export default function ProductsPage() {
               {/* BUILDER */}
               {tab === 1 && (
                 <MDBox p={3}>
-                  {builderErr && <MDTypography color="error" variant="button" mb={2} display="block">{builderErr}</MDTypography>}
+                  {builderErr && (
+                    <MDTypography color="error" variant="button" mb={2} display="block">
+                      {builderErr}
+                    </MDTypography>
+                  )}
 
                   <MDBox display="flex" alignItems="center" justifyContent="space-between" mb={2}>
-                    <MDTypography variant="h6" fontWeight="medium">N-level Product Builder</MDTypography>
+                    <MDTypography variant="h6" fontWeight="medium">
+                      N-level Product Builder
+                    </MDTypography>
                     <MDBox display="flex" alignItems="center" gap={2}>
                       <FormControlLabel
-                        control={<Switch checked={autoCreateLeaves} onChange={(e) => setAutoCreateLeaves(e.target.checked)} />}
+                        control={
+                          <Switch
+                            checked={autoCreateLeaves}
+                            onChange={(e) => setAutoCreateLeaves(e.target.checked)}
+                          />
+                        }
                         label="Auto-create missing leaf SKUs"
                       />
                       <MDButton variant="gradient" color="info" onClick={onSaveStructure} disabled={!canWrite || saving}>
@@ -542,10 +622,22 @@ export default function ProductsPage() {
 
                   {/* Children recursively */}
                   {root.children?.map((c) =>
-                    renderTree({ node: c, isRoot: false, onChange: updateNode, onAddChild: addChild, onRemove: removeNode })
+                    renderTree({
+                      node: c,
+                      isRoot: false,
+                      onChange: updateNode,
+                      onAddChild: addChild,
+                      onRemove: removeNode,
+                    })
                   )}
 
-                  <MDButton variant="outlined" color="info" size="small" onClick={() => addChild(root.id)} sx={{ mt: 1 }}>
+                  <MDButton
+                    variant="outlined"
+                    color="info"
+                    size="small"
+                    onClick={() => addChild(root.id)}
+                    sx={{ mt: 1 }}
+                  >
                     <Icon sx={{ mr: 0.5 }}>add</Icon> Add root child
                   </MDButton>
 

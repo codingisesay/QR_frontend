@@ -1,3 +1,4 @@
+// src/pages/users/index.js
 import { useEffect, useMemo, useState } from "react";
 
 // @mui
@@ -10,6 +11,7 @@ import Icon from "@mui/material/Icon";
 import MDBox from "components/MDBox";
 import MDTypography from "components/MDTypography";
 import MDInput from "components/MDInput";
+import MDSelect from "components/MDSelect";
 import MDButton from "components/MDButton";
 import MDBadge from "components/MDBadge";
 
@@ -21,7 +23,6 @@ import DataTable from "examples/Tables/DataTable";
 // API
 import { listUsers, createUser, updateUser, removeUser } from "api/users";
 import { useAuth } from "auth/AuthProvider";
-
 
 export default function UsersPage() {
   const { perms } = useAuth();
@@ -137,7 +138,7 @@ export default function UsersPage() {
     const rows = rowsRaw.map((u) => {
       const roleStr = u.role || (Array.isArray(u.roles) ? (u.roles[0] || "viewer") : "viewer");
       const statusStr = u.status || "active";
-      const isOwner = roleStr === 'owner' || (Array.isArray(u.roles) && u.roles.includes('owner'));
+      const isOwner = roleStr === "owner" || (Array.isArray(u.roles) && u.roles.includes("owner"));
       const isEditing = editId === u.id;
 
       return {
@@ -162,34 +163,39 @@ export default function UsersPage() {
         ),
         role: (
           canWrite && !isOwner ? (
-            <MDInput
-              select
+            <MDSelect
+              label="Role"
               value={roleStr}
               onChange={(e)=>onChangeRole(u.id, e.target.value)}
               size="small"
-              sx={{ minWidth: 140, '& .MuiInputBase-input': { py: 1 } }}
+              sx={{ minWidth: 140 }}
             >
               <MenuItem value="viewer">Viewer</MenuItem>
               <MenuItem value="admin">Admin</MenuItem>
-            </MDInput>
+            </MDSelect>
           ) : (
-            <MDBadge badgeContent={roleStr} color={roleStr === 'admin' ? 'info' : (roleStr === 'owner' ? 'warning' : 'secondary')} variant="gradient" size="sm" />
+            <MDBadge
+              badgeContent={roleStr}
+              color={roleStr === "admin" ? "info" : (roleStr === "owner" ? "warning" : "secondary")}
+              variant="gradient"
+              size="sm"
+            />
           )
         ),
         status: (
           canWrite ? (
-            <MDInput
-              select
+            <MDSelect
+              label="Status"
               value={statusStr}
               onChange={(e)=>onChangeStatus(u.id, e.target.value)}
               size="small"
-              sx={{ minWidth: 140, '& .MuiInputBase-input': { py: 1 } }}
+              sx={{ minWidth: 140 }}
             >
               <MenuItem value="active">Active</MenuItem>
               <MenuItem value="disabled">Disabled</MenuItem>
-            </MDInput>
+            </MDSelect>
           ) : (
-            <MDBadge badgeContent={statusStr} color={statusStr === 'active' ? 'success' : 'dark'} variant="gradient" size="sm" />
+            <MDBadge badgeContent={statusStr} color={statusStr === "active" ? "success" : "dark"} variant="gradient" size="sm" />
           )
         ),
         edit: (
@@ -279,18 +285,17 @@ export default function UsersPage() {
                     size="small"
                   />
 
-                  {/* Role select — CSS fixed: tighter height + consistent width */}
-                  <MDInput
-                    select
+                  {/* Role select — styled via MDSelect (MDInputRoot) */}
+                  <MDSelect
                     label="Role"
                     value={role}
                     onChange={(e)=>setRole(e.target.value)}
                     size="small"
-                    sx={{ minWidth: 180, '& .MuiInputBase-input': { py: 1 } }}
+                    sx={{ minWidth: 180 }}
                   >
                     <MenuItem value="viewer">Viewer</MenuItem>
                     <MenuItem value="admin">Admin</MenuItem>
-                  </MDInput>
+                  </MDSelect>
 
                   <MDButton type="submit" variant="gradient" color="info" disabled={!canWrite}>
                     <Icon sx={{ mr: 0.5 }}>person_add</Icon>
