@@ -37,6 +37,7 @@ import { listProducts, mintProductCodes } from "api/products";
 import {
   getQrPlanStats,
   exportPrintRunZip,
+  exportPrintRunPdf,
   getBatchesByProduct,
   getRunsByBatch,
   bulkBindDevices,
@@ -641,6 +642,7 @@ function BatchesDialog({ open, onClose, product }) {
   const [runs, setRuns] = useState([]);
   const [runsLoading, setRunsLoading] = useState(false);
   const [previewRunId, setPreviewRunId] = useState(null);
+  const [loadingPdfRun, setLoadingPdfRun] = useState(null);
 
   useEffect(() => {
     let mounted = true;
@@ -752,7 +754,29 @@ function BatchesDialog({ open, onClose, product }) {
             </table>
           </MDBox>
 
-          {/* Runs table */}
+          {
+  async function onPdf(runId) {
+    try {
+      setLoadingPdfRun(runId);
+      await exportPrintRunPdf(runId, {
+        paper: "a4",
+        margin_mm: 10,
+        cols: "",
+        rows: "",
+        gap_mm: 2,
+        qr_mm: 32,
+        show_text: 1,
+        font_pt: 9,
+      });
+    } catch (e) {
+      console.error(e);
+      alert(e?.message || "Failed to download PDF");
+    } finally {
+      setLoadingPdfRun(null);
+    }
+  }
+
+/* Runs table */}
           {selBatch && (
             <MDBox mt={3}>
               <MDTypography variant="h6" fontWeight="medium">
@@ -798,6 +822,45 @@ function BatchesDialog({ open, onClose, product }) {
                           >
                             Download
                           </MDButton>
+                          {/* <MDButton
+                            size="small"
+                            variant="text"
+                            color="info"
+                            onClick={() => onPdf(r.print_run_id)}
+                            disabled={loadingPdfRun === r.print_run_id}
+                          >
+                            {loadingPdfRun === r.print_run_id ? "Building…" : "Download PDF"}
+                          </MDButton> */}
+                          <MDButton
+  size="small"
+  variant="text"
+  color="info"
+  disabled={loadingPdfRun === r.print_run_id}
+  onClick={async () => {
+    try {
+      setLoadingPdfRun(r.print_run_id);
+      // Call your helper directly; tweak options as you like
+      await exportPrintRunPdf(r.print_run_id, {
+        paper: "a4",
+        orientation: "portrait",
+        margin_mm: 10,
+        cols: "",
+        rows: "",
+        gap_mm: 2,
+        qr_mm: 32,
+        show_text: 1,
+        font_pt: 9,
+      });
+    } catch (e) {
+      console.error(e);
+      alert(e?.message || "Failed to download PDF");
+    } finally {
+      setLoadingPdfRun(null);
+    }
+  }}
+>
+  {loadingPdfRun === r.print_run_id ? "Building…" : "Download PDF"}
+</MDButton>
                         </td>
                       </tr>
                     ))}
