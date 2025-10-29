@@ -77,33 +77,33 @@ export async function getQrPlanStats() {
 /**
  * Download a print run as a ZIP of labels (sends auth + tenant headers)
  */
+
 export async function exportPrintRunZip(printRunId) {
-  try {
-    const url = `/print-runs/${encodeURIComponent(printRunId)}/qr.zip`;
-    const resp = await client.get(url, { responseType: "blob" });
+  const url = `/print-runs/${encodeURIComponent(printRunId)}/qr.zip`;
+  const resp = await client.get(url, { responseType: "blob" });   // stays on the authed axios client
 
-    // Try to infer filename from Content-Disposition
-    const dispo = resp.headers?.["content-disposition"] || "";
-    let filename = `print-run-${printRunId}.zip`;
-    const m = dispo.match(/filename\*?=(?:UTF-8'')?["']?([^"';]+)["']?/i);
-    if (m && m[1]) {
-      try { filename = decodeURIComponent(m[1]); } catch {}
-    }
-
-    const blob = new Blob([resp.data], { type: "application/zip" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(a.href);
-  } catch (e) {
-    // Fallback: open direct URL if server allows unauthenticated download
-    const base = client?.defaults?.baseURL?.replace(/\/+$/, "") || "";
-    window.open(`${base}/print-runs/${encodeURIComponent(printRunId)}/qr.zip`, "_blank");
+  // basic sanity check so we don’t “download” an HTML error page
+  const ct = (resp.headers?.["content-type"] || "").toLowerCase();
+  if (!ct.includes("zip") && !ct.includes("application/octet-stream")) {
+    const text = await resp.data.text?.().catch(() => "");
+    throw new Error(text || "Unexpected response while downloading ZIP.");
   }
+
+  let filename = `qr-print-run-${printRunId}.zip`;
+  const dispo = resp.headers?.["content-disposition"] || "";
+  const m = dispo.match(/filename\*?=(?:UTF-8'')?["']?([^"';]+)["']?/i);
+  if (m?.[1]) { try { filename = decodeURIComponent(m[1]); } catch {} }
+
+  const blob = new Blob([resp.data], { type: "application/zip" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(a.href);
 }
+
 
 /**
  * Bulk bind devices for a product (by id or SKU)
@@ -169,4 +169,44 @@ export async function getTenantSettings() {
   // }
   const { data } = await client.get("/tenant/settings");
   return data || {};
+}
+
+// Download a print run as a single PDF of QR labels laid out on a page grid.
+// opts: {
+//   paper?: 'a4'|'letter'|'legal'|'custom',
+//   width_mm?: number, height_mm?: number, // required if paper='custom'
+//   margin_mm?: number,                     // uniform margin
+//   cols?: number, rows?: number,           // grid
+//   gap_mm?: number,                        // gap between cells
+//   qr_mm?: number,                         // QR side in mm (inside each cell)
+//   show_text?: 0|1,                        // show human code under QR
+//   font_pt?: number,                       // text size
+// }
+export async function exportPrintRunPdf(printRunId, opts = {}) {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(opts)) {
+    if (v !== undefined && v !== null && v !== "") params.set(k, String(v));
+  }
+  const url = `/print-runs/${encodeURIComponent(printRunId)}/qr.pdf?` + params.toString();
+  const resp = await client.get(url, { responseType: "blob" });
+
+  const ct = (resp.headers?.["content-type"] || "").toLowerCase();
+  if (!ct.includes("pdf")) {
+    const text = await resp.data.text?.().catch(() => "");
+    throw new Error(text || "Unexpected response while downloading PDF.");
+  }
+
+  let filename = `qr-print-run-${printRunId}.pdf`;
+  const dispo = resp.headers?.["content-disposition"] || "";
+  const m = dispo.match(/filename\*?=(?:UTF-8'')?["']?([^"';]+)["']?/i);
+  if (m?.[1]) { try { filename = decodeURIComponent(m[1]); } catch {} }
+
+  const blob = new Blob([resp.data], { type: "application/pdf" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(a.href);
 }
