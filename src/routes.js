@@ -15,6 +15,7 @@ import HomePublic from "layouts/public/home";
 import SetNewPassword from "layouts/authentication/reset-password/set";
 import ProductsPage from "layouts/products";
 import TrackQrPage from "layouts/track"; // NEW
+import NfcPage from "layouts/nfc"
 
 
 import AuthOnly from "auth/AuthOnly";
@@ -81,6 +82,19 @@ const routes = [
   authOnly: true,
 },
 {
+    type: "collapse",
+    name: "NFC",
+    key: "nfc",
+    icon: <Icon>nfc</Icon>,
+    route: "/nfc",
+    component: (
+      <Protected need="product.write">
+        <NfcPage />
+      </Protected>
+    ),
+    authOnly: true,
+  },
+{
   type: "collapse",
   name: "Generate QR",
   key: "generate-qr",
@@ -106,6 +120,7 @@ const routes = [
   ),
   authOnly: true,
 },
+
   {
     type: "collapse",
     name: "Billing",
